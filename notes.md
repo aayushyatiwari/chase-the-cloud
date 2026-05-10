@@ -34,10 +34,10 @@
 ## TODO
 priority wise
 
-- [ ] **Data Correctness Verification**: # need a method to check the correct of 1146 files i have on here. working on this.
+- [x] **Data Correctness Verification**: # need a method to check the correct of 1146 files i have on here. working on this.
     - Figure out a robust method to check for missing frames, temporal gaps, and data artifacts.
     - Ensure spatial consistency across the dataset.
     - only after doing this will we proceed.
-- [ ] **Refine Preprocessing**: Update `data/preprocess.py` based on findings from the correctness checks.
-- [ ] **Finalize Dataset Class**: Complete and test the `Clouds` dataset class in `src/dataset.py`.
+- [x] **Refine Preprocessing**: Update `data/preprocess.py` based on findings from the correctness checks.
+- [x] **Finalize Dataset Class**: Complete and test the `Clouds` dataset class in `src/dataset.py`.
 - [ ] **Model Definition**: Implement the Diffusion Model architecture (U-Net based) for cloud forecasting.
