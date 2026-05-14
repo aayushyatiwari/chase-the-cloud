@@ -1,0 +1,25 @@
+# Data Settings
+data:
+  manifest_path: "data/manifest.json"
+  T: 6
+  train_split: 0.9
+
+# Training Hyperparameters
+train:
+  batch_size: 2
+  lr: 0.0001
+  epochs: 20
+  num_workers: 2
+  checkpoint_dir: "checkpoints"
+  save_every: 5
+
+# Model Architecture (ConvLSTM)
+model:
+  hidden_dim: 64
+  kernel_size: 3
+  num_layers: 2
+
+# Logging
+logging:
+  project: "cloud-diffusion"
+  use_wandb: true
