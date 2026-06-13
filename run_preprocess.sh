@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-RAW_DIR="data/raw"
+RAW_DIR="data/data"
 OUT_DIR="data/processed"
-NORM_MIN=150.0
-NORM_MAX=320.0
+NORM_MIN=180.0
+NORM_MAX=300.0
 FILL_VALUE=0.0
 
 python3 src/preprocess.py \
