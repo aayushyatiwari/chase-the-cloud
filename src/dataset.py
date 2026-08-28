@@ -13,10 +13,10 @@ class Clouds(Dataset):
         return len(self.samples)
 
     def __getitem__(self, idx):
+        # Load failures are raised, not substituted: silently swapping in a
+        # random sample would draw from the whole dataset, leaking training
+        # frames into validation and hiding corrupt data.
         sample = self.samples[idx]
-        try:
-            inputs = np.stack([np.load(p) for p in sample['input_frames']])
-            target = np.load(sample['target_frame'])
-            return torch.tensor(inputs, dtype=torch.float32), torch.tensor(target, dtype=torch.float32)
-        except Exception:
-            return self.__getitem__(np.random.randint(len(self)))
+        inputs = np.stack([np.load(p) for p in sample['input_frames']])
+        target = np.load(sample['target_frame'])
+        return torch.tensor(inputs, dtype=torch.float32), torch.tensor(target, dtype=torch.float32)

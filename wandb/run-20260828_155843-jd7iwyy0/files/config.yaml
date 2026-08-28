@@ -1,0 +1,71 @@
+_wandb:
+    value:
+        cli_version: 0.27.2
+        e:
+            6dfgqyap7jkdrq58v28v6w8p3jvxklti:
+                codePath: train.py
+                codePathLocal: train.py
+                cpu_count: 16
+                cpu_count_logical: 24
+                cudaVersion: "13.3"
+                disk:
+                    /:
+                        total: "1005921464320"
+                        used: "163367149568"
+                email: aayushyatiwari@gmail.com
+                executable: /home/imaayush/miniconda3/envs/torchgpu/bin/python
+                git:
+                    commit: 66d8bd94c25f2b7950133e371f55494bf4771e7d
+                    remote: git@github.com:aayushyatiwari/chase-the-cloud.git
+                gpu: NVIDIA GeForce RTX 4050 Laptop GPU
+                gpu_count: 1
+                gpu_nvidia:
+                    - architecture: Ada
+                      cudaCores: 2560
+                      memoryTotal: "6439305216"
+                      name: NVIDIA GeForce RTX 4050 Laptop GPU
+                      uuid: GPU-ea7e44fb-b868-990e-a235-f6bdc559fca2
+                host: kb24aayush
+                memory:
+                    total: "16462254080"
+                os: Linux-7.1.8-arch1-3-x86_64-with-glibc2.44
+                program: /home/imaayush/code/chase-the-cloud/train.py
+                python: CPython 3.11.15
+                root: /home/imaayush/code/chase-the-cloud
+                startedAt: "2026-08-28T10:28:43.376423Z"
+                writerId: 6dfgqyap7jkdrq58v28v6w8p3jvxklti
+        m: []
+        python_version: 3.11.15
+        t:
+            "1":
+                - 1
+            "2":
+                - 1
+            "3":
+                - 16
+            "4": 3.11.15
+            "5": 0.27.2
+            "12": 0.27.2
+            "13": linux-x86_64
+data:
+    value:
+        T: 6
+        manifest_path: data/manifest.json
+        train_split: 0.8
+logging:
+    value:
+        project: cloud-diffusion
+        use_wandb: true
+model:
+    value:
+        hidden_dim: 64
+        kernel_size: 3
+        num_layers: 3
+train:
+    value:
+        batch_size: 2
+        checkpoint_dir: checkpoints
+        epochs: 20
+        lr: 0.0001
+        num_workers: 2
+        save_every: 5

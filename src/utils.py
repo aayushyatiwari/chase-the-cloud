@@ -41,22 +41,39 @@ def create_window(window_size, channel):
     window = _2D_window.expand(channel, 1, window_size, window_size).contiguous()
     return window
 
-def calculate_csi(preds, targets, threshold=0.5):
+def csi_counts(preds, targets, threshold=0.5):
+    """
+    Contingency counts (hits, misses, false_alarms) for the cold-cloud class.
+
+    preprocess.py normalizes so that cold cloud tops -> 0 and the warm surface
+    -> 1, so a cloud pixel is one BELOW the threshold. The default 0.5
+    corresponds to 240K, a standard cold cloud-top cutoff.
+
+    Returns raw counts so they can be pooled across a whole epoch before
+    forming the ratio: CSI is a ratio of sums, not a mean of per-batch ratios.
+    """
+    preds_bin = (preds < threshold).float()
+    targets_bin = (targets < threshold).float()
+
+    hits = (preds_bin * targets_bin).sum().item()
+    misses = ((1 - preds_bin) * targets_bin).sum().item()
+    false_alarms = (preds_bin * (1 - targets_bin)).sum().item()
+    return hits, misses, false_alarms
+
+
+def csi_from_counts(hits, misses, false_alarms):
     """
     Critical Success Index (CSI) / Threat Score.
-    CSI = Hits / (Hits + Misses + FalseAlarms)
-    Higher is better.
+    CSI = Hits / (Hits + Misses + FalseAlarms). Higher is better.
+    True negatives are excluded, so clear sky cannot inflate the score.
+    Undefined (NaN) when no cloud is present in either prediction or target.
     """
-    # Threshold predictions and targets to binary (e.g., cloud / no cloud)
-    preds_bin = (preds > threshold).float()
-    targets_bin = (targets > threshold).float()
-
-    hits = (preds_bin * targets_bin).sum()
-    misses = ((1 - preds_bin) * targets_bin).sum()
-    false_alarms = (preds_bin * (1 - targets_bin)).sum()
-
     denominator = hits + misses + false_alarms
-    if denominator == 0:
-        return torch.tensor(0.0).to(preds.device)
-    
-    return hits / denominator
+    return hits / denominator if denominator > 0 else float('nan')
+
+
+def calculate_csi(preds, targets, threshold=0.5):
+    """CSI for a single batch. Prefer pooling csi_counts over a full epoch."""
+    return torch.tensor(
+        csi_from_counts(*csi_counts(preds, targets, threshold))
+    ).to(preds.device)

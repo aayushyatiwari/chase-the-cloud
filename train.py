@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import yaml
 import wandb
+from datetime import datetime
 from torch.utils.data import DataLoader, random_split, Subset
 from src.dataset import Clouds
 from src.models.convlstm import ConvLSTM
@@ -32,12 +33,13 @@ def main():
         T=config['data']['T']
     )
     
+    # Leave a T-sample gap at the boundary so no train/val sample shares
+    # overlapping raw frames (sliding-window manifest has stride 1).
     train_size = int(config['data']['train_split'] * len(full_dataset))
-    val_size = len(full_dataset) - train_size
     train_dataset = Subset(full_dataset, range(0, train_size))
-    val_dataset = Subset(full_dataset, range(train_size, len(full_dataset)))
-    
-    print(f"Dataset loaded. Train samples: {train_size}, Val samples: {val_size}")
+    val_dataset = Subset(full_dataset, range(train_size + config['data']['T'], len(full_dataset)))
+
+    print(f"Dataset loaded. Train samples: {len(train_dataset)}, Val samples: {len(val_dataset)}")
 
     train_loader = DataLoader(
         train_dataset, 
@@ -66,12 +68,18 @@ def main():
     best_val_loss = float('inf')
 
     # 5. Initialize the Trainer (The Engine)
+    # e.g. 20260828_161422_L3_h64 -- timestamp plus architecture, so a stale
+    # checkpoint can never be mistaken for one matching the current config.
+    run_name = (f"{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+                f"_L{config['model']['num_layers']}_h{config['model']['hidden_dim']}")
+
     trainer = Trainer(
-        model, 
-        optimizer, 
-        criterion, 
-        device, 
-        checkpoint_dir=config['train']['checkpoint_dir']
+        model,
+        optimizer,
+        criterion,
+        device,
+        checkpoint_dir=config['train']['checkpoint_dir'],
+        run_name=run_name
     )
     
     # 6. The Main Training Loop
@@ -87,18 +95,16 @@ def main():
         
         print(f"==> Epoch {epoch} Complete.")
         print(f"    Train Loss: {avg_train_loss:.4f}")
-        print(f"    Val Loss:   {val_metrics['loss']:.4f}")
-        print(f"    Val SSIM:   {val_metrics['ssim']:.4f}")
-        print(f"    Val CSI:    {val_metrics['csi']:.4f}")
-        
+        print(f"    Val Loss:   {val_metrics['loss']:.4f}  (persistence {val_metrics['persistence_loss']:.4f})")
+        print(f"    Val SSIM:   {val_metrics['ssim']:.4f}  (persistence {val_metrics['persistence_ssim']:.4f})")
+        print(f"    Val CSI:    {val_metrics['csi']:.4f}  (persistence {val_metrics['persistence_csi']:.4f})")
+
         # Log to wandb
         if config['logging']['use_wandb']:
             wandb.log({
                 "epoch": epoch,
                 "train_loss": avg_train_loss,
-                "val_loss": val_metrics['loss'],
-                "val_ssim": val_metrics['ssim'],
-                "val_csi": val_metrics['csi']
+                **{f"val_{k}": v for k, v in val_metrics.items()}
             })
 
         # Save every N epochs

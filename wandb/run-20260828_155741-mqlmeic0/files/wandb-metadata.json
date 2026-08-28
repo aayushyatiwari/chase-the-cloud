@@ -1,0 +1,40 @@
+{
+  "os": "Linux-7.1.8-arch1-3-x86_64-with-glibc2.44",
+  "python": "CPython 3.11.15",
+  "startedAt": "2026-08-28T10:27:41.842476Z",
+  "program": "/home/imaayush/code/chase-the-cloud/train.py",
+  "codePath": "train.py",
+  "codePathLocal": "train.py",
+  "git": {
+    "remote": "git@github.com:aayushyatiwari/chase-the-cloud.git",
+    "commit": "66d8bd94c25f2b7950133e371f55494bf4771e7d"
+  },
+  "email": "aayushyatiwari@gmail.com",
+  "root": "/home/imaayush/code/chase-the-cloud",
+  "host": "kb24aayush",
+  "executable": "/home/imaayush/miniconda3/envs/torchgpu/bin/python",
+  "cpu_count": 16,
+  "cpu_count_logical": 24,
+  "gpu": "NVIDIA GeForce RTX 4050 Laptop GPU",
+  "gpu_count": 1,
+  "disk": {
+    "/": {
+      "total": "1005921464320",
+      "used": "163345408000"
+    }
+  },
+  "memory": {
+    "total": "16462254080"
+  },
+  "gpu_nvidia": [
+    {
+      "name": "NVIDIA GeForce RTX 4050 Laptop GPU",
+      "memoryTotal": "6439305216",
+      "cudaCores": 2560,
+      "architecture": "Ada",
+      "uuid": "GPU-ea7e44fb-b868-990e-a235-f6bdc559fca2"
+    }
+  ],
+  "cudaVersion": "13.3",
+  "writerId": "drtq0w4uqzxgwuc686c94uovkuw45bvn"
+}
