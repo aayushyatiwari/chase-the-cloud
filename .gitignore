@@ -16,3 +16,10 @@ env/
 
 # OS
 .DS_Store
+
+# checkpoints
+checkpoints/
+*.pt
+
+# Experiment tracking
+wandb/

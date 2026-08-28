@@ -1,8 +1,0 @@
-Using device: cuda
-Dataset loaded. Train samples: 1079, Val samples: 264
-Checkpoints -> checkpoints/20260828_195904_L3_h64
-Starting Training...
-Epoch [1], Step [0/540], Loss: 0.4876
-Epoch [1], Step [10/540], Loss: 0.4124
-Epoch [1], Step [20/540], Loss: 0.4029
-Epoch [1], Step [30/540], Loss: 0.0797
