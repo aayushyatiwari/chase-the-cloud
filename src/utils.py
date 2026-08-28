@@ -1,6 +1,21 @@
 import torch
 import torch.nn.functional as F
 import numpy as np
+from pathlib import Path
+
+
+def latest_checkpoint(checkpoint_dir='checkpoints'):
+    """
+    Most recently written .pt under checkpoint_dir, searched recursively so it
+    picks up the newest per-run subdirectory (e.g. 20260828_201053_L3_h64/).
+
+    train.py only saves on a validation-loss improvement, so the newest
+    checkpoint of a run is also its best so far.
+    """
+    paths = sorted(Path(checkpoint_dir).rglob('*.pt'), key=lambda p: p.stat().st_mtime)
+    if not paths:
+        raise FileNotFoundError(f"No .pt checkpoints found under {checkpoint_dir}")
+    return paths[-1]
 
 def ssim(img1, img2, window_size=11, size_average=True):
     """
