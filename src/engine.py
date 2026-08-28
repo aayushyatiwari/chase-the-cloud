@@ -104,7 +104,7 @@ class EarlyStopping:
     """
     A simple early stopping mechanism to prevent overfitting.
     """
-    def __init__(self, patience=5, min_delta=0.001):
+    def __init__(self, patience=5, min_delta=1e-5):
         self.patience = patience
         self.min_delta = min_delta
         self.counter = 0
