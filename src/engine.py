@@ -88,6 +88,30 @@ class Trainer:
             'persistence_csi': csi_from_counts(*counts['persistence']),
         }
 
+    def load_checkpoint(self, path, lr=None):
+        """
+        Restore model and optimizer state so training can continue.
+
+        Restoring the optimizer matters as much as the weights: Adam's first and
+        second moment buffers are part of the search state, and starting a fresh
+        optimizer over loaded weights causes a visible loss spike while they
+        rebuild. Returns (completed_epoch, val_loss) from the checkpoint.
+
+        load_state_dict also restores the learning rate that was saved, so pass
+        `lr` to override it -- that is how you resume at a lower rate.
+        """
+        checkpoint = torch.load(path, map_location=self.device)
+        self.model.load_state_dict(checkpoint['model_state_dict'])
+        self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        if lr is not None:
+            for group in self.optimizer.param_groups:
+                group['lr'] = lr
+
+        epoch = checkpoint.get('epoch', 0)
+        loss = checkpoint.get('loss', float('inf'))
+        print(f"Resumed from {path} (epoch {epoch}, val_loss {loss:.4f}, lr {self.optimizer.param_groups[0]['lr']})")
+        return epoch, loss
+
     def save_checkpoint(self, epoch, loss):
         """Saves model weights to disk."""
         path = os.path.join(self.checkpoint_dir, f'model_epoch_{epoch}.pt')

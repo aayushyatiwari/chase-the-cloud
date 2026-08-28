@@ -7,11 +7,14 @@ data:
 # Training Hyperparameters
 train:
   batch_size: 2
-  lr: 0.0001
+  # 3.0e5 both parse as strings. Use plain decimals to stay out of trouble.
+  lr: 0.00003
   epochs: 20
   num_workers: 2
   checkpoint_dir: "checkpoints"
   save_every: 5
+  # null to train from scratch; a .pt path or 'latest' to continue training
+  resume_from: latest # latest for last checkpoint
 
 # Model Architecture (ConvLSTM)
 model:

@@ -7,6 +7,7 @@ from torch.utils.data import DataLoader, random_split, Subset
 from src.dataset import Clouds
 from src.models.convlstm import ConvLSTM
 from src.engine import Trainer, EarlyStopping
+from src.utils import latest_checkpoint
 
 def load_config(config_path):
     with open(config_path, 'r') as f:
@@ -62,7 +63,9 @@ def main():
         num_layers=config['model']['num_layers']
     ).to(device)
     
-    optimizer = torch.optim.Adam(model.parameters(), lr=config['train']['lr'])
+    # float() guards against YAML parsing e.g. 3e-5 as a string
+    lr = float(config['train']['lr'])
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     criterion = nn.MSELoss()
     early = EarlyStopping(patience=5)
     best_val_loss = float('inf')
@@ -82,11 +85,24 @@ def main():
         run_name=run_name
     )
     
-    # 6. The Main Training Loop
+    # 6. Optionally resume from a previous checkpoint
+    # config: train.resume_from -- a path, or 'latest' for the newest checkpoint.
+    # Epoch numbering and best_val_loss continue from the checkpoint so a resumed
+    # run neither restarts the count nor saves a checkpoint worse than the one it
+    # loaded. Checkpoints still go to a fresh run directory.
+    start_epoch = 0
+    resume_from = config['train'].get('resume_from')
+    if resume_from:
+        if resume_from == 'latest':
+            resume_from = latest_checkpoint(config['train']['checkpoint_dir'])
+        start_epoch, best_val_loss = trainer.load_checkpoint(resume_from, lr=lr)
+        early.best_loss = best_val_loss
+
+    # 7. The Main Training Loop
     print("Starting Training...")
     epochs = config['train']['epochs']
 
-    for epoch in range(1, epochs + 1):
+    for epoch in range(start_epoch + 1, start_epoch + epochs + 1):
         # Train
         avg_train_loss = trainer.train_one_epoch(train_loader, epoch)
         
