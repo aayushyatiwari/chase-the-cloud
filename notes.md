@@ -1,5 +1,26 @@
 # Technical Notes: Cloud Motion Nowcasting on INSAT-3DR
 
+## Data range
+
+- Shape: IMG_TIR1 is (1, 1616, 1737) — 1616 rows × 1737 cols (the leading 1 is dropped in preprocess.py's [0] index).
+- Coverage: it's the "ASIA_MER" sector, a Mercator-projected regional crop the satellite ground station already produces, spanning lat −10° to 45.5°, lon 44.5° to 110° (per the file's own attrs).
+- Ground resolution: 4 km/pixel for TIR1 
+- Full sector physical extent: 6,946 km × 6,461 km.
+
+**Processed crop**
+
+DEFAULT_CROP in preprocess.py: rows 680:936, cols 740:996 → 256×256 pixels.
+
+At 4 km/pixel that's:
+
+- 1,020 km × 1,020 km (confirmed directly from the projection coordinates: Δrows = 1020.1 km, Δcols = 1020.4 km — matches 256 px × 4 km almost exactly, small discrepancy is projection rounding).
+
+- Latitude: 15.57°N to 24.65°N
+- Longitude: 72.42°E to 82.04°E
+- Center: ~20.1°N, 77.2°E
+
+That's central-western India — roughly Mumbai/Maharashtra in the southwest corner up through Madhya Pradesh/Gujarat in the north, a ~1000×1000 km box. 
+
 ## 1. Project Scope
 
 Short-term cloud motion forecasting (nowcasting) from geostationary satellite
