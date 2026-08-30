@@ -2,10 +2,12 @@ import torch
 import torch.nn as nn
 import yaml
 import wandb
+from datetime import datetime
 from torch.utils.data import DataLoader, random_split, Subset
 from src.dataset import Clouds
 from src.models.convlstm import ConvLSTM
 from src.engine import Trainer, EarlyStopping
+from src.utils import latest_checkpoint
 
 def load_config(config_path):
     with open(config_path, 'r') as f:
@@ -32,12 +34,13 @@ def main():
         T=config['data']['T']
     )
     
+    # Leave a T-sample gap at the boundary so no train/val sample shares
+    # overlapping raw frames (sliding-window manifest has stride 1).
     train_size = int(config['data']['train_split'] * len(full_dataset))
-    val_size = len(full_dataset) - train_size
     train_dataset = Subset(full_dataset, range(0, train_size))
-    val_dataset = Subset(full_dataset, range(train_size, len(full_dataset)))
-    
-    print(f"Dataset loaded. Train samples: {train_size}, Val samples: {val_size}")
+    val_dataset = Subset(full_dataset, range(train_size + config['data']['T'], len(full_dataset)))
+
+    print(f"Dataset loaded. Train samples: {len(train_dataset)}, Val samples: {len(val_dataset)}")
 
     train_loader = DataLoader(
         train_dataset, 
@@ -60,25 +63,46 @@ def main():
         num_layers=config['model']['num_layers']
     ).to(device)
     
-    optimizer = torch.optim.Adam(model.parameters(), lr=config['train']['lr'])
+    # float() guards against YAML parsing e.g. 3e-5 as a string
+    lr = float(config['train']['lr'])
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     criterion = nn.MSELoss()
     early = EarlyStopping(patience=5)
     best_val_loss = float('inf')
 
     # 5. Initialize the Trainer (The Engine)
+    # e.g. 20260828_161422_L3_h64 -- timestamp plus architecture, so a stale
+    # checkpoint can never be mistaken for one matching the current config.
+    run_name = (f"{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+                f"_L{config['model']['num_layers']}_h{config['model']['hidden_dim']}")
+
     trainer = Trainer(
-        model, 
-        optimizer, 
-        criterion, 
-        device, 
-        checkpoint_dir=config['train']['checkpoint_dir']
+        model,
+        optimizer,
+        criterion,
+        device,
+        checkpoint_dir=config['train']['checkpoint_dir'],
+        run_name=run_name
     )
     
-    # 6. The Main Training Loop
+    # 6. Optionally resume from a previous checkpoint
+    # config: train.resume_from -- a path, or 'latest' for the newest checkpoint.
+    # Epoch numbering and best_val_loss continue from the checkpoint so a resumed
+    # run neither restarts the count nor saves a checkpoint worse than the one it
+    # loaded. Checkpoints still go to a fresh run directory.
+    start_epoch = 0
+    resume_from = config['train'].get('resume_from')
+    if resume_from:
+        if resume_from == 'latest':
+            resume_from = latest_checkpoint(config['train']['checkpoint_dir'])
+        start_epoch, best_val_loss = trainer.load_checkpoint(resume_from, lr=lr)
+        early.best_loss = best_val_loss
+
+    # 7. The Main Training Loop
     print("Starting Training...")
     epochs = config['train']['epochs']
 
-    for epoch in range(1, epochs + 1):
+    for epoch in range(start_epoch + 1, start_epoch + epochs + 1):
         # Train
         avg_train_loss = trainer.train_one_epoch(train_loader, epoch)
         
@@ -87,18 +111,16 @@ def main():
         
         print(f"==> Epoch {epoch} Complete.")
         print(f"    Train Loss: {avg_train_loss:.4f}")
-        print(f"    Val Loss:   {val_metrics['loss']:.4f}")
-        print(f"    Val SSIM:   {val_metrics['ssim']:.4f}")
-        print(f"    Val CSI:    {val_metrics['csi']:.4f}")
-        
+        print(f"    Val Loss:   {val_metrics['loss']:.4f}  (persistence {val_metrics['persistence_loss']:.4f})")
+        print(f"    Val SSIM:   {val_metrics['ssim']:.4f}  (persistence {val_metrics['persistence_ssim']:.4f})")
+        print(f"    Val CSI:    {val_metrics['csi']:.4f}  (persistence {val_metrics['persistence_csi']:.4f})")
+
         # Log to wandb
         if config['logging']['use_wandb']:
             wandb.log({
                 "epoch": epoch,
                 "train_loss": avg_train_loss,
-                "val_loss": val_metrics['loss'],
-                "val_ssim": val_metrics['ssim'],
-                "val_csi": val_metrics['csi']
+                **{f"val_{k}": v for k, v in val_metrics.items()}
             })
 
         # Save every N epochs

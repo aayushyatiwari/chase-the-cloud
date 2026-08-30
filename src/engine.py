@@ -1,20 +1,24 @@
 import torch
 import os
+from datetime import datetime
 
 class Trainer:
     """
     The Engine: This class handles the actual training loop, validation, and checkpointing.
     Keeping this separate from train.py makes your code much cleaner.
     """
-    def __init__(self, model, optimizer, criterion, device, checkpoint_dir='checkpoints'):
+    def __init__(self, model, optimizer, criterion, device, checkpoint_dir='checkpoints', run_name=None):
         self.model = model
         self.optimizer = optimizer
         self.criterion = criterion
         self.device = device
-        self.checkpoint_dir = checkpoint_dir
-        # self.early_stopping = EarlyStopping(patience=5)
-        # Ensure checkpoint directory exists
-        os.makedirs(checkpoint_dir, exist_ok=True)
+        # Each run writes into its own timestamped subdirectory, so checkpoints
+        # from different runs (and different architectures) never interleave
+        # under the same model_epoch_N.pt names.
+        self.run_name = run_name or datetime.now().strftime('%Y%m%d_%H%M%S')
+        self.checkpoint_dir = os.path.join(checkpoint_dir, self.run_name)
+        os.makedirs(self.checkpoint_dir, exist_ok=True)
+        print(f"Checkpoints -> {self.checkpoint_dir}")
 
     def train_one_epoch(self, dataloader, epoch):
         """Runs one full pass through the training data."""
@@ -45,36 +49,68 @@ class Trainer:
         return running_loss / len(dataloader)
 
     def validate(self, dataloader, threshold=0.5):
-        """Runs a pass through the validation data without updating weights."""
-        from src.utils import ssim, calculate_csi
+        """
+        Runs a pass through the validation data without updating weights.
+
+        Also scores a persistence forecast (repeat the last input frame) on the
+        same batches. A model that does not clearly beat persistence has learned
+        no cloud motion, so these numbers belong next to every model metric.
+        """
+        from src.utils import ssim, csi_counts, csi_from_counts
         self.model.eval()
-        val_loss = 0.0
-        val_ssim = 0.0
-        val_csi = 0.0
-        
+        # 'model' and 'persistence' each track [loss, ssim] sums and pooled CSI counts
+        sums = {'model': [0.0, 0.0], 'persistence': [0.0, 0.0]}
+        counts = {'model': [0.0, 0.0, 0.0], 'persistence': [0.0, 0.0, 0.0]}
+
         with torch.no_grad():
             for inputs, targets in dataloader:
                 inputs = inputs.unsqueeze(2).to(self.device)
                 targets = targets.unsqueeze(1).to(self.device)
-                
-                outputs = self.model(inputs)
-                
-                # Calculate MSE (Loss)
-                loss = self.criterion(outputs, targets)
-                val_loss += loss.item()
-                
-                # Calculate SSIM
-                val_ssim += ssim(outputs, targets).item()
-                
-                # Calculate CSI
-                val_csi += calculate_csi(outputs, targets, threshold=threshold).item()
-                
-        metrics = {
-            'loss': val_loss / len(dataloader),
-            'ssim': val_ssim / len(dataloader),
-            'csi': val_csi / len(dataloader)
+
+                preds = {
+                    'model': self.model(inputs),
+                    'persistence': inputs[:, -1],
+                }
+
+                for name, pred in preds.items():
+                    sums[name][0] += self.criterion(pred, targets).item()
+                    sums[name][1] += ssim(pred, targets).item()
+                    for i, c in enumerate(csi_counts(pred, targets, threshold=threshold)):
+                        counts[name][i] += c
+
+        n = len(dataloader)
+        return {
+            'loss': sums['model'][0] / n,
+            'ssim': sums['model'][1] / n,
+            'csi': csi_from_counts(*counts['model']),
+            'persistence_loss': sums['persistence'][0] / n,
+            'persistence_ssim': sums['persistence'][1] / n,
+            'persistence_csi': csi_from_counts(*counts['persistence']),
         }
-        return metrics
+
+    def load_checkpoint(self, path, lr=None):
+        """
+        Restore model and optimizer state so training can continue.
+
+        Restoring the optimizer matters as much as the weights: Adam's first and
+        second moment buffers are part of the search state, and starting a fresh
+        optimizer over loaded weights causes a visible loss spike while they
+        rebuild. Returns (completed_epoch, val_loss) from the checkpoint.
+
+        load_state_dict also restores the learning rate that was saved, so pass
+        `lr` to override it -- that is how you resume at a lower rate.
+        """
+        checkpoint = torch.load(path, map_location=self.device)
+        self.model.load_state_dict(checkpoint['model_state_dict'])
+        self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        if lr is not None:
+            for group in self.optimizer.param_groups:
+                group['lr'] = lr
+
+        epoch = checkpoint.get('epoch', 0)
+        loss = checkpoint.get('loss', float('inf'))
+        print(f"Resumed from {path} (epoch {epoch}, val_loss {loss:.4f}, lr {self.optimizer.param_groups[0]['lr']})")
+        return epoch, loss
 
     def save_checkpoint(self, epoch, loss):
         """Saves model weights to disk."""
@@ -92,7 +128,7 @@ class EarlyStopping:
     """
     A simple early stopping mechanism to prevent overfitting.
     """
-    def __init__(self, patience=5, min_delta=0.001):
+    def __init__(self, patience=5, min_delta=1e-4):
         self.patience = patience
         self.min_delta = min_delta
         self.counter = 0
