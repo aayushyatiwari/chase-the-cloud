@@ -1,10 +1,11 @@
+import json
 import torch
 import torch.nn as nn
 import yaml
 import wandb
 from datetime import datetime
-from torch.utils.data import DataLoader, random_split, Subset
-from src.dataset import Clouds
+from torch.utils.data import DataLoader
+from src.dataset import Clouds, tile_grid
 from src.models.convlstm import ConvLSTM
 from src.models.simvp import SimVP
 from src.engine import Trainer, EarlyStopping
@@ -30,18 +31,30 @@ def main():
     print(f"Using device: {device}")
 
     # 3. Data Preparation
-    full_dataset = Clouds(
-        manifest_path=config['data']['manifest_path'], 
-        T=config['data']['T']
-    )
-    
-    # Leave a T-sample gap at the boundary so no train/val sample shares
-    # overlapping raw frames (sliding-window manifest has stride 1).
-    train_size = int(config['data']['train_split'] * len(full_dataset))
-    train_dataset = Subset(full_dataset, range(0, train_size))
-    val_dataset = Subset(full_dataset, range(train_size + config['data']['T'], len(full_dataset)))
+    # Split by time window, then let each side pick its own crops. Splitting
+    # windows first keeps every crop of a timestamp on one side of the boundary.
+    # The T-window gap means no raw frame is shared across the split, because
+    # the manifest slides one frame at a time.
+    T = config['data']['T']
+    crop_size = config['data']['crop_size']
+    n_windows = len(json.load(open(config['data']['manifest_path'])))
+    train_size = int(config['data']['train_split'] * n_windows)
 
-    print(f"Dataset loaded. Train samples: {len(train_dataset)}, Val samples: {len(val_dataset)}")
+    common = dict(manifest_path=config['data']['manifest_path'], T=T, crop_size=crop_size)
+
+    # Training crops move around every epoch, which is the whole point of
+    # multi-crop: same number of steps, but new regions each time.
+    train_dataset = Clouds(**common, window_range=range(0, train_size), random_crop=True)
+
+    # Validation uses a fixed grid so the metric measures the model, not which
+    # crops happened to come up. val_stride thins the grid to keep it quick.
+    grid = tile_grid(train_dataset.H, train_dataset.W, crop_size,
+                     stride=config['data']['val_crop_stride'])
+    val_dataset = Clouds(**common, window_range=range(train_size + T, n_windows), crops=grid)
+
+    print(f"Frames are {train_dataset.C}x{train_dataset.H}x{train_dataset.W}, crop {crop_size}")
+    print(f"Train: {len(train_dataset)} samples ({train_size} windows, 1 random crop each)")
+    print(f"Val:   {len(val_dataset)} samples ({n_windows - train_size - T} windows x {len(grid)} crops)")
 
     train_loader = DataLoader(
         train_dataset, 
@@ -57,19 +70,20 @@ def main():
     )
     
     # 4. Initialize Model, Optimizer, and Loss Function
+    # Channel count comes from the data, so adding channels needs no code change.
+    C_in = train_dataset.C
     model_type = config['model']['type']
     if model_type == 'convlstm':
         model = ConvLSTM(
-            input_dim=1,
+            input_dim=C_in,
             hidden_dim=config['model']['hidden_dim'],
             kernel_size=config['model']['kernel_size'],
             num_layers=config['model']['num_layers']
         ).to(device)
         arch_tag = f"L{config['model']['num_layers']}_h{config['model']['hidden_dim']}"
     elif model_type == 'simvp':
-        _, H, W = full_dataset[0][0].shape  # inputs are (T, H, W)
         model = SimVP(
-            shape_in=(config['data']['T'], 1, H, W),
+            shape_in=(T, C_in, crop_size, crop_size),
             hid_S=config['model']['hid_S'],
             hid_T=config['model']['hid_T'],
             N_S=config['model']['N_S'],

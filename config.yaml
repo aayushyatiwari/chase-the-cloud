@@ -1,8 +1,12 @@
 # Data Settings
 data:
-  manifest_path: "data/manifest.json"
+  manifest_path: "data/manifest_full.json"
   T: 6
   train_split: 0.8
+  crop_size: 256
+  # Spacing of the fixed validation crop grid. 256 = non-overlapping (36 crops
+  # on a 1616x1737 sector); raise it for fewer crops and quicker validation.
+  val_crop_stride: 512
 
 # Training Hyperparameters
 train:
@@ -17,7 +21,7 @@ train:
 
 # Model Architecture
 model:
-  type: simvp # convlstm or simvp
+  type: convlstm # convlstm or simvp
 
   # ConvLSTM
   hidden_dim: 64

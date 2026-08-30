@@ -26,11 +26,11 @@ class Trainer:
         running_loss = 0.0
         
         for i, (inputs, targets) in enumerate(dataloader):
-            # 1. Prepare data: (Batch, Time, H, W) -> (Batch, Time, 1, H, W)
-            # We add a 'Channel' dimension of 1 because Conv2d expects [B, C, H, W]
-            inputs = inputs.unsqueeze(2).to(self.device)
-            targets = targets.unsqueeze(1).to(self.device)
-            
+            # The dataset already provides the channel axis:
+            # inputs (B, T, C, H, W), targets (B, C, H, W).
+            inputs = inputs.to(self.device)
+            targets = targets.to(self.device)
+
             # 2. Forward pass
             self.optimizer.zero_grad()
             outputs = self.model(inputs)
@@ -64,12 +64,16 @@ class Trainer:
 
         with torch.no_grad():
             for inputs, targets in dataloader:
-                inputs = inputs.unsqueeze(2).to(self.device)
-                targets = targets.unsqueeze(1).to(self.device)
+                inputs = inputs.to(self.device)
+                targets = targets.to(self.device)
 
+                # Persistence repeats the last input frame, but only the
+                # channels being predicted -- with extra input channels (e.g.
+                # water vapour) the inputs are wider than the target, and the
+                # predicted channel (TIR1) comes first.
                 preds = {
                     'model': self.model(inputs),
-                    'persistence': inputs[:, -1],
+                    'persistence': inputs[:, -1, :targets.shape[1]],
                 }
 
                 for name, pred in preds.items():

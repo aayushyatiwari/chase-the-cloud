@@ -18,9 +18,12 @@ def _timestamp(path):
     return datetime(int(year), _MONTHS[month], int(day), int(hour), int(minute))
 
 def _is_valid(path):
+    # Frames are (C, H, W) now -- the channel axis is always there, even when
+    # there is only one channel. mmap_mode avoids reading the whole frame just
+    # to check its shape, which matters for full-sector files.
     try:
-        arr = np.load(path)
-        return arr.ndim == 2 and not np.all(np.isnan(arr))
+        arr = np.load(path, mmap_mode='r')
+        return arr.ndim == 3
     except Exception:
         return False
 
