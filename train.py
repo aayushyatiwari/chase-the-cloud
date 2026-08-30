@@ -6,6 +6,7 @@ from datetime import datetime
 from torch.utils.data import DataLoader, random_split, Subset
 from src.dataset import Clouds
 from src.models.convlstm import ConvLSTM
+from src.models.simvp import SimVP
 from src.engine import Trainer, EarlyStopping
 from src.utils import latest_checkpoint
 
@@ -56,13 +57,31 @@ def main():
     )
     
     # 4. Initialize Model, Optimizer, and Loss Function
-    model = ConvLSTM(
-        input_dim=1, 
-        hidden_dim=config['model']['hidden_dim'], 
-        kernel_size=config['model']['kernel_size'], 
-        num_layers=config['model']['num_layers']
-    ).to(device)
-    
+    model_type = config['model']['type']
+    if model_type == 'convlstm':
+        model = ConvLSTM(
+            input_dim=1,
+            hidden_dim=config['model']['hidden_dim'],
+            kernel_size=config['model']['kernel_size'],
+            num_layers=config['model']['num_layers']
+        ).to(device)
+        arch_tag = f"L{config['model']['num_layers']}_h{config['model']['hidden_dim']}"
+    elif model_type == 'simvp':
+        _, H, W = full_dataset[0][0].shape  # inputs are (T, H, W)
+        model = SimVP(
+            shape_in=(config['data']['T'], 1, H, W),
+            hid_S=config['model']['hid_S'],
+            hid_T=config['model']['hid_T'],
+            N_S=config['model']['N_S'],
+            N_T=config['model']['N_T'],
+            T_out=1,
+            groups=config['model']['groups'],
+        ).to(device)
+        arch_tag = f"hidS{config['model']['hid_S']}_NT{config['model']['N_T']}"
+    else:
+        raise ValueError(f"Unknown model.type: {model_type!r} (expected 'convlstm' or 'simvp')")
+
+
     # float() guards against YAML parsing e.g. 3e-5 as a string
     lr = float(config['train']['lr'])
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
@@ -71,10 +90,9 @@ def main():
     best_val_loss = float('inf')
 
     # 5. Initialize the Trainer (The Engine)
-    # e.g. 20260828_161422_L3_h64 -- timestamp plus architecture, so a stale
-    # checkpoint can never be mistaken for one matching the current config.
-    run_name = (f"{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-                f"_L{config['model']['num_layers']}_h{config['model']['hidden_dim']}")
+    # e.g. 20260828_161422_convlstm_L3_h64 -- timestamp plus architecture, so a
+    # stale checkpoint can never be mistaken for one matching the current config.
+    run_name = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{model_type}_{arch_tag}"
 
     trainer = Trainer(
         model,

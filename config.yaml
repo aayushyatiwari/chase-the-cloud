@@ -13,13 +13,23 @@ train:
   checkpoint_dir: "checkpoints"
   save_every: 5
   # null to train from scratch; a .pt path or 'latest' to continue training
-  resume_from: latest # latest for last checkpoint
+  resume_from: null # latest for last checkpoint
 
-# Model Architecture (ConvLSTM)
+# Model Architecture
 model:
+  type: simvp # convlstm or simvp
+
+  # ConvLSTM
   hidden_dim: 64
   kernel_size: 3
   num_layers: 3
+
+  # SimVP
+  hid_S: 64
+  hid_T: 256
+  N_S: 4
+  N_T: 4
+  groups: 8
 
 # Logging
 logging:
