@@ -1,4 +1,6 @@
 import json
+import random
+import numpy as np
 import torch
 import torch.nn as nn
 import yaml
@@ -8,6 +10,7 @@ from torch.utils.data import DataLoader
 from src.dataset import Clouds, tile_grid
 from src.models.convlstm import ConvLSTM
 from src.models.simvp import SimVP
+from src.models.residual import ResidualWrapper
 from src.engine import Trainer, EarlyStopping
 from src.utils import latest_checkpoint
 
@@ -15,10 +18,26 @@ def load_config(config_path):
     with open(config_path, 'r') as f:
         return yaml.safe_load(f)
 
+def set_seed(seed):
+    """
+    Make a run repeatable: the same seed gives the same starting weights, the
+    same random crops and the same shuffle order. Without this every run differs
+    slightly, so two architectures cannot be fairly compared -- the gap between
+    them might just be luck.
+
+    GPU kernels can still add tiny non-determinism. Setting
+    torch.backends.cudnn.deterministic = True removes that too, but is slower.
+    """
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+
 def main():
     # 1. Load Configuration
     config = load_config('config.yaml')
-    
+    set_seed(config['train']['seed'])
+
     # 2. Initialize wandb
     if config['logging']['use_wandb']:
         wandb.init(
@@ -95,12 +114,18 @@ def main():
     else:
         raise ValueError(f"Unknown model.type: {model_type!r} (expected 'convlstm' or 'simvp')")
 
+    # Predict the change from the last frame rather than the frame itself.
+    if config['model'].get('residual'):
+        model = ResidualWrapper(model, out_channels=1).to(device)
+        arch_tag += "_res"
+        print("Residual mode: model predicts the change from the last input frame")
+
 
     # float() guards against YAML parsing e.g. 3e-5 as a string
     lr = float(config['train']['lr'])
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     criterion = nn.MSELoss()
-    early = EarlyStopping(patience=5)
+    early = EarlyStopping()  # patience in epochs
     best_val_loss = float('inf')
 
     # 5. Initialize the Trainer (The Engine)
@@ -145,7 +170,7 @@ def main():
         print(f"    Train Loss: {avg_train_loss:.4f}")
         print(f"    Val Loss:   {val_metrics['loss']:.4f}  (persistence {val_metrics['persistence_loss']:.4f})")
         print(f"    Val SSIM:   {val_metrics['ssim']:.4f}  (persistence {val_metrics['persistence_ssim']:.4f})")
-        print(f"    Val CSI:    {val_metrics['csi']:.4f}  (persistence {val_metrics['persistence_csi']:.4f})")
+        print(f"    Val PSNR:   {val_metrics['psnr']:.2f} dB  (persistence {val_metrics['persistence_psnr']:.2f} dB)")
 
         # Log to wandb
         if config['logging']['use_wandb']:

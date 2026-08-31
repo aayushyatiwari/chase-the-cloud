@@ -56,6 +56,20 @@ def create_window(window_size, channel):
     window = _2D_window.expand(channel, 1, window_size, window_size).contiguous()
     return window
 
+def psnr(pred, target, data_range=1.0):
+    """
+    Peak Signal-to-Noise Ratio, in decibels. Higher is better.
+
+    This is MSE on a log scale: psnr = 10 * log10(range^2 / mse). It carries no
+    information MSE does not already have, but video prediction papers report
+    it, so it makes results comparable with them.
+    """
+    mse = F.mse_loss(pred, target)
+    if mse == 0:
+        return torch.tensor(float('inf'), device=pred.device)
+    return 10.0 * torch.log10((data_range ** 2) / mse)
+
+
 def csi_counts(preds, targets, threshold=0.5):
     """
     Contingency counts (hits, misses, false_alarms) for the cold-cloud class.

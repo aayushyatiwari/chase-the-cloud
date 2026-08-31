@@ -10,6 +10,7 @@ data:
 
 # Training Hyperparameters
 train:
+  seed: 42
   batch_size: 2
   lr: 0.0001
   epochs: 30
@@ -22,6 +23,8 @@ train:
 # Model Architecture
 model:
   type: convlstm # convlstm or simvp
+  # true = predict the change from the last frame instead of the whole frame
+  residual: true
 
   # ConvLSTM
   hidden_dim: 64

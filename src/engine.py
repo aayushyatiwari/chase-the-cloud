@@ -48,7 +48,7 @@ class Trainer:
                 
         return running_loss / len(dataloader)
 
-    def validate(self, dataloader, threshold=0.5):
+    def validate(self, dataloader):
         """
         Runs a pass through the validation data without updating weights.
 
@@ -56,11 +56,10 @@ class Trainer:
         same batches. A model that does not clearly beat persistence has learned
         no cloud motion, so these numbers belong next to every model metric.
         """
-        from src.utils import ssim, csi_counts, csi_from_counts
+        from src.utils import ssim, psnr
         self.model.eval()
-        # 'model' and 'persistence' each track [loss, ssim] sums and pooled CSI counts
-        sums = {'model': [0.0, 0.0], 'persistence': [0.0, 0.0]}
-        counts = {'model': [0.0, 0.0, 0.0], 'persistence': [0.0, 0.0, 0.0]}
+        # each entry is [loss, ssim, psnr] summed over batches
+        sums = {'model': [0.0, 0.0, 0.0], 'persistence': [0.0, 0.0, 0.0]}
 
         with torch.no_grad():
             for inputs, targets in dataloader:
@@ -77,19 +76,24 @@ class Trainer:
                 }
 
                 for name, pred in preds.items():
+                    # Loss is on the raw output, since that is what training
+                    # actually minimises.
                     sums[name][0] += self.criterion(pred, targets).item()
-                    sums[name][1] += ssim(pred, targets).item()
-                    for i, c in enumerate(csi_counts(pred, targets, threshold=threshold)):
-                        counts[name][i] += c
+                    # SSIM and PSNR assume values in [0,1], but the output layer
+                    # is unbounded and drifts slightly outside it, so clip first.
+                    # The SimVP reference implementation clips the same way.
+                    clipped = pred.clamp(0.0, 1.0)
+                    sums[name][1] += ssim(clipped, targets).item()
+                    sums[name][2] += psnr(clipped, targets).item()
 
         n = len(dataloader)
         return {
             'loss': sums['model'][0] / n,
             'ssim': sums['model'][1] / n,
-            'csi': csi_from_counts(*counts['model']),
+            'psnr': sums['model'][2] / n,
             'persistence_loss': sums['persistence'][0] / n,
             'persistence_ssim': sums['persistence'][1] / n,
-            'persistence_csi': csi_from_counts(*counts['persistence']),
+            'persistence_psnr': sums['persistence'][2] / n,
         }
 
     def load_checkpoint(self, path, lr=None):
@@ -132,7 +136,7 @@ class EarlyStopping:
     """
     A simple early stopping mechanism to prevent overfitting.
     """
-    def __init__(self, patience=5, min_delta=1e-4):
+    def __init__(self, patience=10, min_delta=1e-5):
         self.patience = patience
         self.min_delta = min_delta
         self.counter = 0
