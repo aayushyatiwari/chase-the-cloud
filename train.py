@@ -1,7 +1,9 @@
 import json
 import random
+import shutil
 import numpy as np
 import torch
+import torch.multiprocessing
 import torch.nn as nn
 import yaml
 import wandb
@@ -13,6 +15,30 @@ from src.models.simvp import SimVP
 from src.models.residual import ResidualWrapper
 from src.engine import Trainer, EarlyStopping
 from src.utils import latest_checkpoint
+
+def use_shm_safe_sharing(min_gb=1.0):
+    """
+    Fall back to file-based tensor sharing when /dev/shm is small.
+
+    DataLoader workers hand tensors to the main process through shared memory.
+    Containers routinely ship a 64MB /dev/shm, which overflows and kills the
+    workers with a bus error -- and it surfaces as a RuntimeError inside the
+    model's forward pass, which points at entirely the wrong code. The
+    file_system strategy passes tensors through temp files instead, so this
+    needs no change to how the container was started.
+
+    Only applied when /dev/shm is actually small: the default strategy is
+    faster, and on a normal machine there is nothing to work around.
+    """
+    try:
+        free_gb = shutil.disk_usage('/dev/shm').total / 1e9
+    except OSError:
+        return
+    if free_gb < min_gb:
+        torch.multiprocessing.set_sharing_strategy('file_system')
+        print(f"/dev/shm is only {free_gb:.2f}GB -- "
+              "using file_system tensor sharing so DataLoader workers survive")
+
 
 def load_config(config_path):
     with open(config_path, 'r') as f:
@@ -37,6 +63,7 @@ def main():
     # 1. Load Configuration
     config = load_config('config.yaml')
     set_seed(config['train']['seed'])
+    use_shm_safe_sharing()
 
     # 2. Initialize wandb
     if config['logging']['use_wandb']:
