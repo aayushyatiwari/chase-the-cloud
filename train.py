@@ -15,6 +15,7 @@ from src.models.simvp import SimVP
 from src.models.residual import ResidualWrapper
 from src.engine import Trainer, EarlyStopping
 from src.utils import latest_checkpoint
+import time
 
 def use_shm_safe_sharing(min_gb=1.0):
     """
@@ -184,6 +185,8 @@ def main():
 
     # 7. The Main Training Loop
     print("Starting Training...")
+    start = time.time()
+    print(f"time now: {start}")
     epochs = config['train']['epochs']
 
     for epoch in range(start_epoch + 1, start_epoch + epochs + 1):
@@ -221,6 +224,8 @@ def main():
             break
         
 
+    end = time.time()
+    print(f"Training completed in {end - start:.2f} seconds.")
     print("Training Finished!")
 
 if __name__ == "__main__":
