@@ -1,3 +1,5 @@
+import math
+
 import torch
 import torch.nn.functional as F
 import numpy as np
@@ -56,18 +58,41 @@ def create_window(window_size, channel):
     window = _2D_window.expand(channel, 1, window_size, window_size).contiguous()
     return window
 
-def psnr(pred, target, data_range=1.0):
+def squared_error_counts(pred, target):
     """
-    Peak Signal-to-Noise Ratio, in decibels. Higher is better.
+    Sum of squared errors, and the number of elements behind it.
+
+    Returned raw for the same reason as csi_counts: PSNR has to be formed once
+    from a whole epoch's pooled MSE, not averaged over batches. See psnr_from_mse.
+    """
+    return torch.sum((pred - target) ** 2).item(), pred.numel()
+
+
+def psnr_from_mse(mse, data_range=1.0):
+    """
+    Peak Signal-to-Noise Ratio in decibels, from an already-pooled MSE.
 
     This is MSE on a log scale: psnr = 10 * log10(range^2 / mse). It carries no
     information MSE does not already have, but video prediction papers report
     it, so it makes results comparable with them.
+
+    Take the log ONCE, at the end, over the pooled MSE. Averaging per-batch PSNR
+    averages logarithms, which is the log of the *geometric* mean of the batch
+    MSEs -- a different number, always lower than the true PSNR, and inconsistent
+    with the MSE reported next to it. A single near-perfect batch also sends its
+    PSNR to infinity and poisons the whole epoch average.
     """
-    mse = F.mse_loss(pred, target)
-    if mse == 0:
-        return torch.tensor(float('inf'), device=pred.device)
-    return 10.0 * torch.log10((data_range ** 2) / mse)
+    if mse <= 0:
+        return float('inf')
+    return 10.0 * math.log10((data_range ** 2) / mse)
+
+
+def psnr(pred, target, data_range=1.0):
+    """
+    PSNR for a single batch. Prefer pooling squared_error_counts over an epoch.
+    """
+    se, n = squared_error_counts(pred, target)
+    return torch.tensor(psnr_from_mse(se / n, data_range), device=pred.device)
 
 
 def csi_counts(preds, targets, threshold=0.5):

@@ -56,15 +56,27 @@ class Trainer:
         same batches. A model that does not clearly beat persistence has learned
         no cloud motion, so these numbers belong next to every model metric.
         """
-        from src.utils import ssim, psnr
+        from src.utils import ssim, squared_error_counts, psnr_from_mse
         self.model.eval()
-        # each entry is [loss, ssim, psnr] summed over batches
-        sums = {'model': [0.0, 0.0, 0.0], 'persistence': [0.0, 0.0, 0.0]}
+
+        # Loss and SSIM are means over a batch, so they are accumulated weighted
+        # by batch size -- the last batch is usually short and must not count as
+        # much as a full one.
+        #
+        # PSNR is not a mean at all. It is pooled as squared error and elements,
+        # then turned into decibels once at the end, for the reason spelled out
+        # in psnr_from_mse: averaging per-batch PSNR averages logarithms.
+        weighted = {'model': [0.0, 0.0], 'persistence': [0.0, 0.0]}   # [loss, ssim]
+        sq_err = {'model': 0.0, 'persistence': 0.0}
+        n_elem = {'model': 0, 'persistence': 0}
+        n_seen = 0
 
         with torch.no_grad():
             for inputs, targets in dataloader:
                 inputs = inputs.to(self.device)
                 targets = targets.to(self.device)
+                batch = targets.shape[0]
+                n_seen += batch
 
                 # Persistence repeats the last input frame, but only the
                 # channels being predicted -- with extra input channels (e.g.
@@ -78,23 +90,24 @@ class Trainer:
                 for name, pred in preds.items():
                     # Loss is on the raw output, since that is what training
                     # actually minimises.
-                    sums[name][0] += self.criterion(pred, targets).item()
+                    weighted[name][0] += self.criterion(pred, targets).item() * batch
                     # SSIM and PSNR assume values in [0,1], but the output layer
                     # is unbounded and drifts slightly outside it, so clip first.
                     # The SimVP reference implementation clips the same way.
                     clipped = pred.clamp(0.0, 1.0)
-                    sums[name][1] += ssim(clipped, targets).item()
-                    sums[name][2] += psnr(clipped, targets).item()
+                    weighted[name][1] += ssim(clipped, targets).item() * batch
+                    se, n = squared_error_counts(clipped, targets)
+                    sq_err[name] += se
+                    n_elem[name] += n
 
-        n = len(dataloader)
-        return {
-            'loss': sums['model'][0] / n,
-            'ssim': sums['model'][1] / n,
-            'psnr': sums['model'][2] / n,
-            'persistence_loss': sums['persistence'][0] / n,
-            'persistence_ssim': sums['persistence'][1] / n,
-            'persistence_psnr': sums['persistence'][2] / n,
-        }
+        metrics = {}
+        for name in ('model', 'persistence'):
+            prefix = '' if name == 'model' else 'persistence_'
+            metrics[prefix + 'loss'] = weighted[name][0] / n_seen
+            metrics[prefix + 'ssim'] = weighted[name][1] / n_seen
+            metrics[prefix + 'psnr'] = psnr_from_mse(sq_err[name] / n_elem[name])
+        return metrics
+
 
     def load_checkpoint(self, path, lr=None):
         """
