@@ -1,0 +1,53 @@
+# Conda environment for chase-the-cloud (INSAT cloud-motion forecasting).
+#
+#   conda env create -f environment.yml
+#   conda activate chase-the-cloud
+#
+# ---------------------------------------------------------------------------
+# IMPORTANT -- why CUDA 11.8 and not something newer:
+#
+# The target node runs NVIDIA driver 470.256.02 (max CUDA 11.4) on 2x Quadro
+# RTX 6000. CUDA 12.x builds REQUIRE driver >= 525 and will fail at runtime
+# with "CUDA driver version is insufficient for CUDA runtime version".
+#
+# The cu118 wheels below run correctly on driver 470 through CUDA minor-version
+# compatibility (any driver >= 450.80.02). Do not "upgrade" torch to a cu12x
+# build unless the node's driver is also upgraded.
+#
+# Quadro RTX 6000 is Turing (compute capability 7.5): fp16 tensor cores yes,
+# bf16 no. Use torch.amp with dtype=float16, not bfloat16.
+# ---------------------------------------------------------------------------
+
+name: chase-the-cloud
+
+channels:
+  - conda-forge
+
+dependencies:
+  - python=3.11
+
+  # --- numerics ---
+  - numpy=2.*
+
+  # --- satellite data I/O ---
+  - h5py=3.16.*              # reads the raw INSAT .h5 granules
+  - netcdf4=1.7.*            # reads .nc samples
+  - cftime=1.6.*             # netCDF4 time-axis dependency
+
+  # --- config, logging, plotting ---
+  - pyyaml=6.*               # config.yaml
+  - matplotlib=3.10.*
+  - pillow=12.*
+
+  # --- notebooks (src/ runs headless; notebooks/ are for inspection) ---
+  - jupyterlab
+  - ipykernel
+
+  - pip
+  - pip:
+      # PyTorch built against CUDA 11.8 -- see the driver note at the top.
+      # The extra index URL is required; plain PyPI serves cu12x builds only.
+      - --extra-index-url https://download.pytorch.org/whl/cu118
+      - torch==2.6.0+cu118
+      - torchvision==0.21.0+cu118
+      - wandb==0.27.2        # experiment tracking, used by train.py
