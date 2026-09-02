@@ -24,7 +24,7 @@ train:
 
 # Model Architecture
 model:
-  type: convlstm # convlstm or simvp
+  type: simvp # convlstm or simvp
   # true = predict the change from the last frame instead of the whole frame
   residual: true
 
