@@ -18,7 +18,7 @@ train:
   checkpoint_dir: "checkpoints"
   # Stop after this many epochs with no validation improvement.
   early_stopping_patience: 10
-  early_stopping_min_delta: 0.0001
+  early_stopping_min_delta: 0.00001
   # null to train from scratch; a .pt path or 'latest' to continue training
   resume_from: null # latest for last checkpoint
 
