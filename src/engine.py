@@ -23,7 +23,10 @@ class Trainer:
     def train_one_epoch(self, dataloader, epoch):
         """Runs one full pass through the training data."""
         self.model.train()
+        # Weighted by batch size, like validate: the last batch is usually
+        # short and should not count as much as a full one.
         running_loss = 0.0
+        n_seen = 0
         
         for i, (inputs, targets) in enumerate(dataloader):
             # The dataset already provides the channel axis:
@@ -40,13 +43,14 @@ class Trainer:
             loss.backward()
             self.optimizer.step()
             
-            running_loss += loss.item()
+            running_loss += loss.item() * targets.shape[0]
+            n_seen += targets.shape[0]
             
             # Log progress every 10 batches
             if i % 10 == 0:
                 print(f"Epoch [{epoch}], Step [{i}/{len(dataloader)}], Loss: {loss.item():.4f}")
                 
-        return running_loss / len(dataloader)
+        return running_loss / n_seen
 
     def validate(self, dataloader):
         """
@@ -88,15 +92,14 @@ class Trainer:
                 }
 
                 for name, pred in preds.items():
-                    # Loss is on the raw output, since that is what training
-                    # actually minimises.
+                    # Clip first, then score everything on that one tensor.
+                    # Scoring loss on the raw output but SSIM and PSNR on a
+                    # clipped one made the three metrics describe different
+                    # tensors, so they disagreed about the same model.
+                    pred = pred.clamp(0.0, 1.0)
                     weighted[name][0] += self.criterion(pred, targets).item() * batch
-                    # SSIM and PSNR assume values in [0,1], but the output layer
-                    # is unbounded and drifts slightly outside it, so clip first.
-                    # The SimVP reference implementation clips the same way.
-                    clipped = pred.clamp(0.0, 1.0)
-                    weighted[name][1] += ssim(clipped, targets).item() * batch
-                    se, n = squared_error_counts(clipped, targets)
+                    weighted[name][1] += ssim(pred, targets).item() * batch
+                    se, n = squared_error_counts(pred, targets)
                     sq_err[name] += se
                     n_elem[name] += n
 

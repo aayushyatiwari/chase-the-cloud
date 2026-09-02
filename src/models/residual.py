@@ -28,4 +28,8 @@ class ResidualWrapper(nn.Module):
 
     def forward(self, x):
         # x: (B, T, C, H, W)  ->  last frame: (B, out_channels, H, W)
-        return x[:, -1, :self.out_channels] + self.model(x)
+        pred = x[:, -1, :self.out_channels] + self.model(x)
+        # Frames are scaled to [0,1], so a value outside that is not a real
+        # brightness temperature. Without this the model can lower its training
+        # loss by drifting out of range, where evaluation just clips it away.
+        return pred.clamp(0.0, 1.0)

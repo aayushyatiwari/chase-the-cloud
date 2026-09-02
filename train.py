@@ -210,10 +210,6 @@ def main():
                 **{f"val_{k}": v for k, v in val_metrics.items()}
             })
 
-        # Save every N epochs
-        # if epoch % config['train']['save_every'] == 0:
-        #     trainer.save_checkpoint(epoch, val_metrics['loss'])
-
         if val_metrics['loss'] < best_val_loss:
             best_val_loss = val_metrics['loss']
             trainer.save_checkpoint(epoch, val_metrics['loss']) 
