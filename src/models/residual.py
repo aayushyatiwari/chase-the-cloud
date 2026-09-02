@@ -1,4 +1,33 @@
+import torch
 import torch.nn as nn
+
+
+class BoundedOutput(nn.Module):
+    """
+    Squash a model's output into [0,1], the range frames are scaled to.
+
+    ResidualWrapper bounds its own output. Without the same bound on the plain
+    path, a residual run and a bare run would be trained against different
+    objectives -- one bounded, one not -- and could not be compared fairly. The
+    bare models end in a 1x1 conv with no activation, so nothing else keeps
+    them in range.
+
+    Sigmoid, not clamp. A fresh ConvLSTM's output starts near zero and is
+    often entirely negative -- 5 of 8 seeds tested -- so a clamp would flatten
+    every pixel onto the boundary, where its gradient is zero, and the model
+    would never train at all. Sigmoid is bounded everywhere and differentiable
+    everywhere, and starts predictions near 0.5 instead of 0.
+
+    ResidualWrapper can still use a clamp because it adds the last frame first,
+    which lands the prediction inside the range to begin with.
+    """
+
+    def __init__(self, model):
+        super().__init__()
+        self.model = model
+
+    def forward(self, x):
+        return torch.sigmoid(self.model(x))
 
 
 class ResidualWrapper(nn.Module):

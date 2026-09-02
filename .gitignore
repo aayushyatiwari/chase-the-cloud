@@ -23,3 +23,11 @@ checkpoints/
 
 # Experiment tracking
 wandb/
+
+# Run artifacts
+*.log
+*.pid
+nohup.out
+
+# Dataset archives staged for transfer to a remote machine
+*.tar.gz

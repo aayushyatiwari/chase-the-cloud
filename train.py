@@ -8,11 +8,12 @@ import torch.nn as nn
 import yaml
 import wandb
 from datetime import datetime
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch.utils.data import DataLoader
 from src.dataset import Clouds, tile_grid
 from src.models.convlstm import ConvLSTM
 from src.models.simvp import SimVP
-from src.models.residual import ResidualWrapper
+from src.models.residual import BoundedOutput, ResidualWrapper
 from src.engine import Trainer, EarlyStopping
 from src.utils import latest_checkpoint
 import time
@@ -150,16 +151,38 @@ def main():
         raise ValueError(f"Unknown model.type: {model_type!r} (expected 'convlstm' or 'simvp')")
 
     # Predict the change from the last frame rather than the frame itself.
+    # Either way the final prediction is bounded to [0,1], so the two modes are
+    # trained against the same bounded objective and can be compared. They are
+    # bounded differently because they have to be -- see BoundedOutput.
     if config['model'].get('residual'):
         model = ResidualWrapper(model, out_channels=1).to(device)
         arch_tag += "_res"
         print("Residual mode: model predicts the change from the last input frame")
+    else:
+        model = BoundedOutput(model).to(device)
 
 
     # float() guards against YAML parsing e.g. 3e-5 as a string
     lr = float(config['train']['lr'])
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     criterion = nn.MSELoss()
+
+    # Cut the learning rate once validation stops improving. A fixed rate leaves
+    # both losses flat well before early stopping fires -- the optimiser is
+    # taking steps too big to settle into the minimum it is already sitting in.
+    # lr_patience must stay below early_stopping_patience, or training ends
+    # before the rate is ever reduced.
+    scheduler = None
+    if config['train'].get('lr_schedule'):
+        scheduler = ReduceLROnPlateau(
+            optimizer,
+            mode='min',
+            factor=float(config['train'].get('lr_factor', 0.5)),
+            patience=config['train'].get('lr_patience', 3),
+            min_lr=float(config['train'].get('lr_min', 1e-6)),
+        )
+        print(f"LR schedule: halve after {scheduler.patience} epochs without improvement")
+
     early = EarlyStopping(
         patience=config['train'].get('early_stopping_patience', 10),
         # float() guards against YAML reading 1.0e-5 as a string
@@ -213,6 +236,15 @@ def main():
         val_metrics = trainer.validate(val_loader)
         val_secs = time.time() - val_start
 
+        # Step the schedule on the same number early stopping watches, so the
+        # rate is always cut a few epochs before the run is given up on.
+        lr_before = optimizer.param_groups[0]['lr']
+        if scheduler is not None:
+            scheduler.step(val_metrics['loss'])
+        current_lr = optimizer.param_groups[0]['lr']
+        if current_lr != lr_before:
+            print(f"    LR reduced: {lr_before:.2e} -> {current_lr:.2e}")
+
         epoch_secs = time.time() - epoch_start
         epochs_run += 1
         # Guess the finish time from the average epoch so far, so a long run
@@ -235,6 +267,7 @@ def main():
             wandb.log({
                 "epoch": epoch,
                 "train_loss": avg_train_loss,
+                "lr": current_lr,
                 "epoch_seconds": epoch_secs,
                 "train_seconds": train_secs,
                 "val_seconds": val_secs,

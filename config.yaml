@@ -12,9 +12,13 @@ data:
 train:
   seed: 42
   batch_size: 8
-  lr: 0.0001
   epochs: 100
   num_workers: 0
+  lr: 0.0001
+  lr_schedule: true
+  lr_factor: 0.5
+  lr_patience: 3
+  lr_min: 1.0e-6
   checkpoint_dir: "checkpoints"
   # Stop after this many epochs with no validation improvement.
   early_stopping_patience: 10
