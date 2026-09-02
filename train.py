@@ -41,6 +41,13 @@ def use_shm_safe_sharing(min_gb=1.0):
               "using file_system tensor sharing so DataLoader workers survive")
 
 
+def fmt_duration(seconds):
+    """Seconds as h:mm:ss, so a long run is readable at a glance."""
+    hours, rest = divmod(int(seconds), 3600)
+    minutes, secs = divmod(rest, 60)
+    return f"{hours}:{minutes:02d}:{secs:02d}"
+
+
 def load_config(config_path):
     with open(config_path, 'r') as f:
         return yaml.safe_load(f)
@@ -188,29 +195,49 @@ def main():
         early.best_loss = best_val_loss
 
     # 7. The Main Training Loop
-    print("Starting Training...")
-    start = time.time()
-    print(f"time now: {start}")
     epochs = config['train']['epochs']
+    start = time.time()
+    print(f"Starting Training... ({epochs} epochs max, "
+          f"began {datetime.now().strftime('%Y-%m-%d %H:%M:%S')})")
 
+    epochs_run = 0
     for epoch in range(start_epoch + 1, start_epoch + epochs + 1):
+        epoch_start = time.time()
+
         # Train
         avg_train_loss = trainer.train_one_epoch(train_loader, epoch)
-        
+        train_secs = time.time() - epoch_start
+
         # Validate
+        val_start = time.time()
         val_metrics = trainer.validate(val_loader)
-        
+        val_secs = time.time() - val_start
+
+        epoch_secs = time.time() - epoch_start
+        epochs_run += 1
+        # Guess the finish time from the average epoch so far, so a long run
+        # can be left alone with some idea of when to come back.
+        elapsed = time.time() - start
+        remaining = (epochs - epochs_run) * (elapsed / epochs_run)
+
         print(f"==> Epoch {epoch} Complete.")
         print(f"    Train Loss: {avg_train_loss:.4f}")
         print(f"    Val Loss:   {val_metrics['loss']:.4f}  (persistence {val_metrics['persistence_loss']:.4f})")
         print(f"    Val SSIM:   {val_metrics['ssim']:.4f}  (persistence {val_metrics['persistence_ssim']:.4f})")
         print(f"    Val PSNR:   {val_metrics['psnr']:.2f} dB  (persistence {val_metrics['persistence_psnr']:.2f} dB)")
+        print(f"    Time:       {fmt_duration(epoch_secs)} "
+              f"(train {fmt_duration(train_secs)}, val {fmt_duration(val_secs)})")
+        print(f"    Elapsed:    {fmt_duration(elapsed)}, "
+              f"about {fmt_duration(remaining)} left if it runs all {epochs}")
 
         # Log to wandb
         if config['logging']['use_wandb']:
             wandb.log({
                 "epoch": epoch,
                 "train_loss": avg_train_loss,
+                "epoch_seconds": epoch_secs,
+                "train_seconds": train_secs,
+                "val_seconds": val_secs,
                 **{f"val_{k}": v for k, v in val_metrics.items()}
             })
 
@@ -224,9 +251,10 @@ def main():
             break
         
 
-    end = time.time()
-    print(f"Training completed in {end - start:.2f} seconds.")
-    print("Training Finished!")
+    total = time.time() - start
+    print(f"Training Finished! {epochs_run} epochs in {fmt_duration(total)} "
+          f"(average {fmt_duration(total / max(epochs_run, 1))} per epoch)")
+    print(f"Best validation loss: {best_val_loss:.4f}")
 
 if __name__ == "__main__":
     main()
