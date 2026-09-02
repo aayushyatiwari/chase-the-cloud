@@ -153,7 +153,11 @@ def main():
     lr = float(config['train']['lr'])
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     criterion = nn.MSELoss()
-    early = EarlyStopping()  # patience in epochs
+    early = EarlyStopping(
+        patience=config['train'].get('early_stopping_patience', 10),
+        # float() guards against YAML reading 1.0e-5 as a string
+        min_delta=float(config['train'].get('early_stopping_min_delta', 1e-5)),
+    )
     best_val_loss = float('inf')
 
     # 5. Initialize the Trainer (The Engine)

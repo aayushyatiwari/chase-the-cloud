@@ -8,14 +8,24 @@ def tile_grid(H, W, size=256, stride=None):
     """
     Top-left corners of a grid of crops covering an (H, W) frame.
 
-    stride=size (the default) gives non-overlapping tiles: 36 of them on a
-    1616x1737 sector at size 256. A smaller stride gives more, overlapping
-    crops -- more samples, but they share pixels so they are less independent.
+    stride=size (the default) steps one tile at a time. A smaller stride gives
+    more, overlapping crops -- more samples, but they share pixels so they are
+    less independent.
+
+    A frame is rarely an exact number of strides across, so a last row and
+    column flush with the bottom and right edges are added. Without them the
+    leftover strip is never covered: at stride 512 on a 1616x1737 sector that
+    silently left the bottom 336 rows and right 457 columns out of validation.
     """
     stride = stride or size
-    return [(r, c)
-            for r in range(0, H - size + 1, stride)
-            for c in range(0, W - size + 1, stride)]
+
+    def starts(total):
+        pos = list(range(0, total - size + 1, stride))
+        if pos and pos[-1] != total - size:
+            pos.append(total - size)
+        return pos
+
+    return [(r, c) for r in starts(H) for c in starts(W)]
 
 
 class Clouds(Dataset):
