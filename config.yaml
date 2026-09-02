@@ -11,7 +11,7 @@ data:
 # Training Hyperparameters
 train:
   seed: 42
-  batch_size: 2
+  batch_size: 8
   lr: 0.0001
   epochs: 100
   num_workers: 0
