@@ -60,7 +60,7 @@ class Clouds(Dataset):
         if not self.samples:
             raise ValueError(
                 f"No windows selected from {manifest_path} (it has {len(samples)}). "
-                "Check train_split and that the manifest is not tiny."
+                "Check data.splits and that the manifest is not tiny."
             )
         self.T = T
         self.crop_size = crop_size

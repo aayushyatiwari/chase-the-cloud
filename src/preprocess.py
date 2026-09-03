@@ -23,11 +23,15 @@ DEFAULT_NORM_MAX = 300.0
 DEFAULT_FILL_VALUE = 0.0
 
 # Each channel needs its own min/max. Water vapour tops out near 267K because it
-# sees the upper troposphere, so reusing TIR1's 180-300K range would squash all
-# of its detail into the bottom three quarters of [0,1].
+# sees the upper troposphere, so reusing TIR1's range would squash all of its
+# detail into the bottom of [0,1].
+#
+# TIR1/TIR2 span the sensor's own temperature LUT (179.86-340.06K). An earlier
+# 180-300K ceiling clipped 8.5% of target pixels to exactly 1.0: daytime land
+# over India in July reaches 333K.
 NORM_RANGES = {
-    'TIR1': (180.0, 300.0),
-    'TIR2': (180.0, 300.0),
+    'TIR1': (180.0, 340.0),
+    'TIR2': (180.0, 340.0),
     'WV':   (200.0, 270.0),
     'MIR':  (230.0, 315.0),
 }

@@ -2,8 +2,18 @@
 data:
   manifest_path: "data/manifest_full.json"
   T: 6
-  train_split: 0.8
   crop_size: 256
+
+  # Inclusive date ranges. 16 and 24 July 2024 belong to no split: they are
+  # buffer days keeping train, val and test more than a day apart.
+  splits:
+    train: ["2023-07-01", "2024-07-15"]   # 1960 windows, 73%
+    val:   ["2024-07-17", "2024-07-23"]   #  310 windows, 12%
+    test:  ["2024-07-25", "2024-07-31"]   #  322 windows, 12%
+
+  # Val is a training signal (early stopping, LR schedule, checkpoint choice),
+  # so it is not an unbiased estimate. Turn this on once, at the end.
+  evaluate_test: false
   # Spacing of the fixed validation crop grid. 256 = non-overlapping (36 crops
   # on a 1616x1737 sector); raise it for fewer crops and quicker validation.
   val_crop_stride: 512
@@ -11,9 +21,9 @@ data:
 # Training Hyperparameters
 train:
   seed: 42
-  batch_size: 8
-  epochs: 100
-  num_workers: 0
+  batch_size: 2
+  epochs: 2
+  num_workers: 2
   lr: 0.0001
   lr_schedule: true
   lr_factor: 0.5
@@ -30,7 +40,7 @@ train:
 model:
   type: convlstm # convlstm or simvp
   # true = predict the change from the last frame instead of the whole frame
-  residual: true
+  residual: false
 
   # ConvLSTM
   hidden_dim: 64

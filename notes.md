@@ -1,331 +1,294 @@
 # Technical Notes: Cloud Motion Nowcasting on INSAT-3DR
 
-## Data range
+Last substantive update: 2026-09-03.
 
-- Shape: IMG_TIR1 is (1, 1616, 1737) — 1616 rows × 1737 cols (the leading 1 is dropped in preprocess.py's [0] index).
-- Coverage: it's the "ASIA_MER" sector, a Mercator-projected regional crop the satellite ground station already produces, spanning lat −10° to 45.5°, lon 44.5° to 110° (per the file's own attrs).
-- Ground resolution: 4 km/pixel for TIR1 
-- Full sector physical extent: 6,946 km × 6,461 km.
+## 1. Task
 
-**Processed crop**
+Given `T=6` consecutive TIR1 frames at 30-minute spacing, predict the next
+single frame (30 minutes ahead). Not a multi-frame rollout.
 
-DEFAULT_CROP in preprocess.py: rows 680:936, cols 740:996 → 256×256 pixels.
+Experiment matrix, four cells:
 
-At 4 km/pixel that's:
+|  | frame prediction | residual (predict the change) |
+|---|---|---|
+| ConvLSTM | `src/models/convlstm.py` | `+ ResidualWrapper` |
+| SimVP | `src/models/simvp.py` | `+ ResidualWrapper` |
 
-- 1,020 km × 1,020 km (confirmed directly from the projection coordinates: Δrows = 1020.1 km, Δcols = 1020.4 km — matches 256 px × 4 km almost exactly, small discrepancy is projection rounding).
+`src/explore.py` is GOES/NetCDF-era legacy and not part of the pipeline.
 
-- Latitude: 15.57°N to 24.65°N
-- Longitude: 72.42°E to 82.04°E
-- Center: ~20.1°N, 77.2°E
+## 2. Data
 
-That's central-western India — roughly Mumbai/Maharashtra in the southwest corner up through Madhya Pradesh/Gujarat in the north, a ~1000×1000 km box. 
+INSAT-3DR L1C from MOSDAC, `ASIA_MER` sector, HDF5.
 
-## 1. Project Scope
+| | |
+|---|---|
+| frame shape | 1616 × 1737 (rows × cols) |
+| resolution | 4.0 km/pixel (verified from the file's X/Y axes: 6,946 km over 1737 cols) |
+| extent | 44.5–110°E, 10°S–45.5°N |
+| area | 41.2 M km² |
+| cadence | 30 min |
+| raw frames | 2,964 across 62 days — July 2023 (1,469) + July 2024 (1,495) |
+| raw size | 72 GB; processed float32 full-sector 32 GB |
 
-Short-term cloud motion forecasting (nowcasting) from geostationary satellite
-imagery: given `T` consecutive thermal-infrared frames, predict the **single
-next frame**. The project began on NASA GOES-16 data (NetCDF) and now runs on
-**INSAT-3DR** L1C imagery from MOSDAC (HDF5).
-
-- **Channel**: Thermal Infrared 1 (TIR1), single band.
-- **Task**: `T` frames in → 1 frame out (not a multi-frame rollout).
-- **Baseline architecture**: ConvLSTM (`src/models/convlstm.py`).
-- **Legacy**: `src/explore.py` is GOES/NetCDF-era code and is not part of the
-  current pipeline.
-
-## 2. Data Source and Brightness Temperature
-
-INSAT-3DR L1C files contain raw sensor counts plus a lookup table, unlike GOES
-which often supplies brightness temperature (BT) directly. Conversion:
-
-1. Read `IMG_TIR1` (raw counts, range ~480–950), taking index 0 of the `(1,H,W)` array.
-2. Read `IMG_TIR1_TEMP` (1024-element LUT).
-3. Map: `BT = LUT[raw_counts]`.
-
-Resulting BT spans roughly 180K (high, cold cloud tops) to 310K (warm surface).
-Full-disk imagery is ~1616×1737.
+Files carry counts plus a 1024-entry LUT: `BT = IMG_TIR1_TEMP[IMG_TIR1[0]]`.
+LUT span is 179.86–340.06 K for TIR1/TIR2, 179.69–325.34 K for WV,
+179.69–339.79 K for MIR.
 
 ## 3. Preprocessing (`src/preprocess.py`)
 
-Pipeline per file: HDF5 → BT via LUT → crop → normalize → NaN fill → `.npy`.
+HDF5 → BT via LUT → normalize → NaN fill → `.npy` (C, H, W) in
+`data/processed_full/`. Full sector kept; no crop at this stage.
 
-- **Crop**: fixed window, rows `680:936`, cols `740:996` → **256×256**.
-- **Normalization**: `(BT - 180) / (300 - 180)`, clipped to `[0, 1]`.
-- **Output**: `float32` `.npy` in `data/processed/`.
+`NORM_RANGES['TIR1'] = (180.0, 340.0)` — the sensor's own LUT span.
 
-### Orientation convention (important)
+**This was 180–300 K until 2026-09-03 and that was a bug.** Daytime land over
+India in July reaches 333 K, so the old ceiling pinned **8.46%** of all target
+pixels to exactly 1.0 — 15–21% of the sector on midday frames, 0% at night.
+Saturated targets are invisible to the loss: it cannot distinguish a correct
+prediction from an overshoot. Measured after the fix, over all 2,683 targets:
 
-The normalization is **not** cloud-bright. It maps:
-
-| BT | normalized | physical meaning |
+| | before | after |
 |---|---|---|
-| ≤ 180K | **0.0** | coldest / highest cloud tops |
-| ≥ 300K | **1.0** | warm surface, clear sky |
+| pixels == 1.0 | 8.4600% | **0.0000%** |
+| pixels == 0.0 | 0.2336% | 0.2033% |
 
-**Cold cloud is the LOW end of the range.** Any thresholding of cloud must
-therefore test `value < threshold`, not `>`. This convention is the single
-easiest thing to get backwards in this codebase — it silently inverted the CSI
-metric once already (see §8). Note also that `explore.py` plots with `cmap='gray_r'`
-so cold cloud renders bright, while the notebooks plot normalized data with
-`cmap='gray'` where cloud renders dark.
+The remaining 0.20% at zero is the LUT floor at 179.86 K, irreducible.
 
-The [180K, 300K] window is chosen to concentrate resolution on cloud-top
-temperature gradients, which carry the motion signal.
+`MIR: (230.0, 315.0)` has the same disease — LUT reaches 339.8 K and MIR picks
+up solar reflection. Fix before enabling that channel.
 
-## 4. Dataset Construction (`src/manifest.py`)
+### Orientation (easy to get backwards)
 
-Builds a sliding-window manifest over the processed frames. For each window of
-`T+1` frames, the first `T` are inputs and the last is the target.
+Cold cloud is the **LOW** end. 0.0 = 180 K = highest/coldest tops; 1.0 = 340 K =
+warm surface. Cloud thresholds must test `value < threshold`. This silently
+inverted CSI once.
 
-Two guarantees the builder enforces:
+Target distribution, measured: mean 0.596, median 0.646, std 0.157. Only 1.52%
+of pixels below 0.15 and 1.05% above 0.85.
 
-**Sorted by parsed timestamp, not filename.** `_timestamp()` parses the
-`DDMONYYYY_HHMM` field out of the filename. Lexicographic filename sorting is
-only coincidentally correct within a single month — across months it orders
-day-major then month-alphabetically (`01AUG` < `01JUL` < `01JUN`), which would
-scramble the time series entirely. Any multi-month ingest depends on this.
+### Known gap
 
-**Temporal continuity.** `_is_continuous()` rejects any window whose
-consecutive frames are not one time step apart (`step_minutes=30`,
-`tolerance_minutes=5`). Without this check, a missing frame produces a window
-that spans more time than it claims — the model is trained to predict 30
-minutes ahead while the actual target is 60 minutes ahead, or an input sequence
-silently skips an hour of cloud motion. The tolerance keeps benign scan-start
-jitter (±3 min) while dropping genuine frame dropouts.
+`np.nan_to_num(nan=0.0)` runs *after* normalization, so missing data becomes
+180 K — synthetic deep convection. No NaNs are present in the current corpus
+(checked), but this bites the moment a frame with dropouts arrives. `_is_valid()`
+in manifest.py cannot catch it either, since it inspects post-fill `.npy`.
 
-Skips are reported separately (`skipped_gap` vs `skipped_invalid`) so data loss
-is attributable rather than a single opaque number.
+## 4. Manifest (`src/manifest.py`)
 
-### Loader (`src/dataset.py`)
+Sorts by **parsed timestamp**, not filename — lexicographic ordering scrambles
+across months (`01AUG` < `01JUL` < `01JUN`). Rejects any window whose
+consecutive frames are not one 30-min step apart (±5 min tolerance), so no
+window has a mislabeled lead time. The July 2023 → July 2024 seam is dropped
+automatically by this check.
 
-`Clouds.__getitem__` loads the frames and **raises on failure**. It deliberately
-does not substitute a fallback sample: drawing a random replacement index would
-sample the *whole* dataset, bypassing the train/val index ranges and leaking
-training frames into validation, while also hiding corrupt files and making
-validation non-reproducible.
+**Built at stride 7 (non-overlapping): 399 windows**, 169 rejected on gaps, 0
+invalid. Verified disjoint — 2,793 frame references, 2,793 distinct.
 
-## 5. Train / Validation Split (`train.py`)
+At stride 1 the same data gave 2,683 windows, but adjacent windows share 6 of 7
+frames, so that was ~396 independent sequences wearing a 6.8× inflated number.
+`build(..., stride=T+1)` partitions instead. A rejected window still advances by
+1, so a gap costs only the windows spanning it rather than knocking the whole
+partition out of phase.
 
-The split is **sequential** (no shuffling) because the data is a time series —
-random splitting would place near-identical adjacent frames on both sides.
+## 5. Splits (`config.yaml` → `manifest.split_indices`)
 
-Sequential splitting alone is not sufficient. Because the manifest uses a
-**stride-1** sliding window, manifest sample `i` spans raw frames `[i, i+T]`, so
-adjacent samples overlap in `T` of their `T+1` frames. A naive contiguous index
-cut therefore puts samples on either side of the boundary that share up to `T`
-raw frames — and the last training sample's *target* frame appears among the
-first validation sample's *inputs*.
+Date ranges, **not fractions**. A fraction silently moves when data is added:
+`train_split: 0.8` meant "through 25 Jul 2023" before the 2024 merge and would
+have meant "through 19 Jul 2024" after, making no metric comparable across the
+change.
 
-The fix is a **buffer of `T` samples dropped at the boundary**, assigned to
-neither split:
+| split | dates | days | windows | × 49 tiles |
+|---|---|---|---|---|
+| train | 2023-07-01 → 2024-07-15 | 46 | 291 | 14,259 |
+| val | 2024-07-17 → 2024-07-23 | 7 | 46 | 2,254 |
+| test | 2024-07-25 → 2024-07-31 | 7 | 47 | 2,303 |
 
-```python
-train_dataset = Subset(full_dataset, range(0, train_size))
-val_dataset   = Subset(full_dataset, range(train_size + T, len(full_dataset)))
-```
+16 and 24 July 2024 belong to no split — buffer days. The 11–12 July 2024
+acquisition gap (13 of 48 windows on the 11th) sits inside train.
 
-This guarantees no raw frame is shared between any training and any validation
-sample. Cost is `T` discarded samples.
+A window joins a split only if **every one of its 7 frames** is inside the
+range, so nothing reaches across a boundary for its inputs.
 
-## 6. Metrics (`src/utils.py`, `src/engine.py`)
+**Verified**, not assumed: zero shared windows and **zero shared frames**
+between every pair of splits, and all 24 hours present in each split so the
+diurnal cycle is represented identically.
 
-**MSE** — the training objective (`nn.MSELoss`), pixelwise on normalized values.
-The only metric that produces gradients; the others are diagnostic and run
-under `torch.no_grad()`.
+`evaluate_test: false`. Val drives early stopping, the LR schedule and
+checkpoint selection, so it is not an unbiased estimate. Run test once, at the
+end.
 
-**SSIM** — windowed structural similarity, standard Wang et al. formulation
-computed via convolution with an 11×11 Gaussian (σ=1.5). Local means/variances/
-covariance come from `conv2d`, using `Var(X) = E[X²] − E[X]²`. Stabilizers
-`C1=0.01²`, `C2=0.03²` assume **data range 1.0**. Higher is better.
+## 6. Output convention: nothing is bounded
 
-**CSI (Critical Success Index)** — meteorological skill score for the
-**cold-cloud class**:
+No sigmoid, no clamp, anywhere — not in training, not in evaluation, not on the
+residual path. Both architectures end in a plain Conv2d with no activation;
+`ResidualWrapper` adds the last frame to it.
 
-```
-CSI = hits / (hits + misses + false_alarms)
-```
+Reasoning: targets are already inside [0,1] because the **inputs** were
+normalized, so MSE penalizes drift on its own. A clamp in training has zero
+gradient outside the range, so any pixel that wanders out can never be pulled
+back. And a squashing head on one path but not the other would mean the four
+cells train against different objectives — any measured difference could be the
+parameterization or could be the nonlinearity, with no way to separate them.
 
-True negatives are excluded by design, so the large clear-sky majority cannot
-inflate the score. Three properties of this implementation matter:
+Removed 2026-09-03: `clamp(0,1)` in `ResidualWrapper.forward`, `BoundedOutput`
+(sigmoid) on the frame path, `clamp(0,1)` in `Trainer.validate`.
 
-- **Cold class**: thresholds `< threshold`, matching §3. Default `0.5`
-  corresponds to **240K**, close to conventional cold cloud-top cutoffs
-  (~235–241K) used to flag deep convection in IR imagery.
-- **Pooled, not averaged**: `csi_counts()` returns raw hit/miss/false-alarm
-  counts which are accumulated across the whole epoch before
-  `csi_from_counts()` forms the ratio. CSI is a ratio of sums; averaging
-  per-batch ratios is a different (and biased) quantity.
-- **Undefined, not zero**: with no cloud in either prediction or target the
-  denominator is 0 and the result is `NaN`. Returning `0.0` would score a
-  correct "no cloud anywhere" forecast as a total miss.
+**Open:** the frame path now starts near 0 while the target mean is 0.596; the
+residual path starts at persistence. Initializing the final conv bias to the
+train-split mean would equalize the starting points so the comparison isolates
+the parameterization. Not implemented — decide before running the matrix.
 
-`calculate_csi()` remains as a single-batch convenience wrapper returning a
-tensor, used by `notebooks/inference_check.ipynb`.
+## 7. Metrics (`src/utils.py`, `src/engine.py`)
 
-### Persistence baseline
+`Trainer.validate` returns loss / SSIM / PSNR for the model and for a
+**persistence** forecast (repeat the last input frame) on the same batches.
 
-`Trainer.validate()` scores a **persistence forecast** (repeat the last input
-frame) on the same batches and returns `persistence_loss`, `persistence_ssim`,
-`persistence_csi` next to the model metrics.
+- **MSE** — the objective.
+- **SSIM** — Wang et al., 11×11 Gaussian σ=1.5, stabilizers assume data range 1.0.
+- **PSNR** — pooled as squared error and elements, converted to dB once at the
+  end. Averaging per-batch PSNR averages logarithms.
+- **CSI** — implemented in `utils.py` (`csi_counts` / `csi_from_counts`, pooled,
+  returns NaN on an empty denominator) but **not currently wired into
+  `validate()`**.
 
-This is not optional bookkeeping. Over a 30-minute step, clouds move little, so
-persistence is a strong forecast and a model that does not clearly beat it has
-learned no motion. Absolute metric values are misleading without it — on this
-data a constant all-warm image scores CSI ≈ 0.57 under the pre-fix warm-class
-definition. Every reported number should be quoted as a delta against
-persistence.
+Persistence is not optional bookkeeping. Over 30 minutes clouds move little, so
+persistence is strong and absolute numbers are meaningless without it. Quote
+every result as a delta against persistence.
 
-## 7. Training Flow
+Note when comparing to published work: **we forecast 30 minutes, the FY-2G paper
+forecasts 1 hour.** Ours is the easier lead time.
 
-End to end, from raw download to logged metrics:
+## 8. Sampling: why tiling, not random crops
 
-**Stage 1 — Preprocess** (`python src/preprocess.py --raw-dir data/data --out-dir data/processed`)
-Each `.h5` → LUT-mapped BT → 256×256 crop → normalized to `[0,1]` → NaN-filled
-→ `.npy`. Idempotent; existing outputs are skipped unless `--overwrite`.
+A 256×256 crop is 1/43 of the sector, so training has to crop. Random crops are
+badly non-uniform:
 
-**Stage 2 — Build manifest** (`python src/manifest.py`)
-Sort `data/processed/*.npy` by parsed timestamp → validate each frame → slide a
-`T+1` window → reject gap-spanning and invalid windows → write
-`data/manifest.json` as a list of `{input_frames: [...T paths], target_frame: path}`.
-
-**Stage 3 — Launch** (`python train.py`)
-Load `config.yaml` → init wandb → select device → construct `Clouds` →
-sequential split with the `T`-sample buffer (§5) → `DataLoader`s
-(train `shuffle=True`, val `shuffle=False`) → build `ConvLSTM` → Adam + MSE →
-`EarlyStopping` → `Trainer`.
-
-**Stage 4 — Per-epoch train** (`Trainer.train_one_epoch`)
-Per batch: dataset yields `(B, T, H, W)` and `(B, H, W)`; the engine inserts the
-channel axis via `inputs.unsqueeze(2)` → `(B, T, 1, H, W)` and
-`targets.unsqueeze(1)` → `(B, 1, H, W)`. Then zero grad → forward → MSE →
-backward → step. Returns mean training loss.
-
-**Stage 5 — Per-epoch validate** (`Trainer.validate`)
-Under `no_grad`, for each batch compute model output and the persistence
-prediction `inputs[:, -1]`; accumulate MSE and SSIM sums and pooled CSI counts
-for both; return the six metrics.
-
-**Stage 6 — Checkpoint, early stop, log**
-Save on any validation-loss improvement to
-`checkpoints/model_epoch_{epoch}.pt` (state dict + optimizer state + loss).
-`EarlyStopping(patience=5, min_delta=0.001)` monitors validation loss. All
-metrics are logged to wandb under a `val_` prefix.
-
-### Tensor shapes
-
-| stage | shape |
+| pixel | times trained on in 100 epochs |
 |---|---|
-| Dataset item (inputs, target) | `(T, 256, 256)`, `(256, 256)` |
-| Model input | `(B, T, 1, 256, 256)` |
-| ConvLSTM hidden / cell state per layer | `(B, hidden_dim, 256, 256)` |
-| Model output | `(B, 1, 256, 256)` |
+| interior | 3.25× |
+| edge midpoint | 0.013× |
+| corner | 0.00005× |
 
-The ConvLSTM keeps full spatial resolution at every layer (padding preserves
-H×W, no downsampling), so memory scales with `hidden_dim × H × W × num_layers`.
-The final `conv_last` is a 1×1 convolution from `hidden_dim` to 1 channel,
-applied to the last layer's final hidden state.
+Interior pixels are sampled **65,536×** more often than corners — a row-0 pixel
+is reachable from one crop offset, an interior pixel from 256. The undersampled
+band is 255 px deep on every side, **51.7% of the sector**, and after 100 epochs
+14% of the frame has under a 50% chance of ever being seen.
 
-## 8. Correctness Fixes Applied
+That band is real weather, not off-limb space: 6.3% cloud fraction vs 10.2%
+interior, mean |Δ30 min| 0.032 vs 0.037.
 
-Recorded with rationale, since several of these are easy to reintroduce.
+And val/test use `tile_grid`, which covers uniformly — so the current setup
+trains center-heavy and evaluates uniformly. That is a train/eval mismatch that
+biases every cell equally and for reasons unrelated to the thing being measured.
+
+**Fix: tile the sector.** `tile_grid(1616, 1737, 256, stride=256)` gives 49
+tiles (6×6 plus a flush row and column against the right/bottom edges, which
+overlap slightly). Every pixel used, deterministic, identical to val/test.
+
+Do **not** copy the paper's 128→64 center-output design. It exists because
+clouds advect into a patch from outside the model's view. At 14.35 m/s and a
+30-minute step, cloud moves 6.5 px at 4 km, so 95% of a 256 patch is retained,
+versus 88% for their 64 patch at hourly steps. They spend 75% of their pixels as
+non-targets to fix a 12% problem; for us it is a 5% problem.
+
+## 9. Training budget
+
+Stride 7 removes 6.7× redundancy; tiling adds 49× real coverage. Stacking both
+is what made this look unaffordable.
+
+| | samples/epoch |
+|---|---|
+| today (1 random crop) | 1,960 |
+| stride 1 × 49 tiles | 96,040 |
+| **stride 7 × 49 tiles** | **14,259** (291 sequences × 49) |
+| FY-2G paper | 12,800 (800 × 16) |
+
+50 epochs = 712,950 samples, against the paper's 640,000. Comparable, and at
+14,259/epoch an ordinary training loop works — 50 validation checkpoints, no
+chunked-epoch machinery needed.
+
+Measured memory, batch 1 including backward, linear in pixel count:
+
+| | per pixel | at 256² | max frame, 22 GB, batch 2 |
+|---|---|---|---|
+| ConvLSTM | 38.2 MB | 2.51 GB | 536 × 536 |
+| SimVP | 14.4 MB | 0.94 GB | 873 × 873 |
+
+ConvLSTM is 2.7× heavier — it keeps every hidden state across 6 timesteps and 3
+layers for BPTT. It is the binding constraint; size for it and run SimVP the
+same, or the comparison is not clean. On 6 GB (4050 laptop) batch 2 is the
+ceiling at 256². On 24 GB, batch 8; gradient accumulation reaches the paper's 32.
+
+Wall clock at 712,950 samples: 73 h on the 4050 (measured 371 ms/sample),
+~20 h on one 24 GB card, ~10 h on two (both estimates).
+
+Four cells × 3 seeds = 12 runs. Cut seeds before cutting cells — with one seed
+you cannot separate a real effect from initialization luck, and a fresh ConvLSTM
+started entirely negative on 5 of 8 seeds tested.
+
+## 10. Benchmark: FY-2G / Multi-GRU-RCN (Atmosphere 2020, 11, 1151)
+
+| | theirs | ours |
+|---|---|---|
+| frame | 512 × 512 | 1616 × 1737 |
+| resolution | 13.3 km N-S, 10–24 km E-W (~15.8 km effective) | 4.0 km |
+| area | 65.2 M km² | 41.2 M km² |
+| cadence / lead time | 1 h / 1 h | 30 min / 30 min |
+| days | 200 train, 20 val, 20 test (2018, all seasons) | 46 / 7 / 7 (July only) |
+| sequences | non-overlapping, n=6 (5 in → 1 out) | non-overlapping, 6 in → 1 out |
+| patches | 16 per frame, 128 in → 64 center out | 49 per frame, 256 in → 256 out |
+| cases | 12,800 train | 14,259 train |
+| batch / LR | 32 / 1e-3 | 2–8 / 1e-4 |
+| hardware | one Tesla T4, 12.3 h for ConvLSTM | — |
+
+Their stated "13 km in both directions" is inconsistent with their own stated
+extent: 61° of latitude over 512 px is 13.3 km, but 110° of longitude over 512 px
+is 24 km at the equator and 10 km at 65°N. It is a plate carrée grid.
+
+They **do** crop into patches — this is not a whole-frame method.
+
+## 11. Open items
+
+- [x] `src/manifest.py`: stride parameter, built at stride 7 (399 windows).
+- [ ] `train.py` / `Clouds`: tiled training crops (49) instead of `random_crop`.
+- [ ] **New wandb project** — old runs used 180–300 K normalization, a sigmoid
+      output head, clamped metrics and a fractional split. Nothing before
+      2026-09-03 is comparable.
+- [ ] Decide the frame-path bias init (§6).
+- [ ] Wire CSI into `validate()`, or drop it from `utils.py`.
+- [ ] `val_crop_stride: 512` gives 16 tiles → 736 val samples. At 256 (49 tiles)
+      it is 2,254 and matches train coverage. Tile count now drives val sample
+      count, since stride-7 leaves only 46 val windows.
+- [ ] Restore `epochs` to ~50 and pick `batch_size` for the target GPU.
+- [ ] Rotate the MOSDAC password — it is in plaintext in
+      `~/code/chase-the-cloudv2/data/get_data.sh` (not in any git repo).
+
+## 12. Correctness fixes applied
 
 | # | Issue | Resolution |
 |---|---|---|
-| 1 | Manifest built windows across missing frames, so 8.7% of samples had a mislabeled lead time | `_is_continuous()` gap rejection (§4) |
-| 2 | Frames sorted lexicographically — correct for one month, scrambles across months | sort by parsed timestamp (§4) |
-| 3 | CSI thresholded `> 0.5`, scoring the warm 76% majority instead of cold cloud | threshold `< 0.5` for the cold class (§6) |
-| 4 | CSI averaged per-batch ratios instead of pooling counts | `csi_counts()` + `csi_from_counts()` (§6) |
-| 5 | CSI returned `0.0` on an empty denominator, penalizing correct no-cloud forecasts | returns `NaN` (§6) |
-| 6 | No baseline, so absolute metric values looked strong without evidence of skill | persistence baseline in `validate()` (§6) |
-| 7 | Loader substituted a random sample on load failure, leaking train frames into val and hiding corruption | raises instead (§4) |
-| 8 | Contiguous index split shared up to `T` raw frames across the train/val boundary | `T`-sample buffer dropped (§5) |
+| 1 | Windows built across missing frames → mislabeled lead time | `_is_continuous()` gap rejection |
+| 2 | Lexicographic frame sort scrambles across months | sort by parsed timestamp |
+| 3 | CSI thresholded `> 0.5`, scoring the warm majority | threshold `< 0.5` |
+| 4 | CSI averaged per-batch ratios | pooled counts |
+| 5 | CSI returned 0.0 on empty denominator | returns NaN |
+| 6 | No baseline | persistence in `validate()` |
+| 7 | Loader substituted a random sample on failure, leaking splits | raises |
+| 8 | Contiguous index split shared frames across the boundary | date splits, whole-window containment, buffer days |
+| 9 | 180–300 K normalization clipped 8.46% of targets to 1.0 | 180–340 K, the LUT span |
+| 10 | Clamp in `ResidualWrapper` killed gradients outside range | removed |
+| 11 | Sigmoid on the frame path only → different objective per cell | removed |
+| 12 | Metrics clamped before scoring | unclipped |
+| 13 | Fractional split moved silently when data was added | date-based splits |
+| 14 | No test set | third split, gated behind `evaluate_test` |
+| 15 | Random crops sampled interior 65,536× more than corners | tiled crops |
 
-## 9. Reference Data Characteristics
+## 13. Environment
 
-Measured on the current corpus; useful for sanity checks.
+`torchgpu` conda env — Python 3.11, PyTorch 2.6.0+cu124, CUDA 12.4, plus
+`h5py`, `numpy`, `matplotlib`, `scipy`, `scikit-image`, `wandb`, `opencv`,
+`pyyaml`. `nomkl` avoids an MKL/OMP symbol clash during visualization.
 
-- **Coverage**: July 2023 only, single fixed 256×256 crop, 30-minute nominal cadence.
-- **Volume**: 1469 raw `.h5` ≈ **36 GB**; the same month processed ≈ **374 MB**
-  (~100× reduction). A full year of processed frames is only ~4.5 GB, so the
-  storage constraint is raw-archive retention, not training data.
-- **Continuity**: 1488 slots expected for the month, 1469 present → **19 missing
-  frames** across 23 irregular intervals, including a near-daily 06:45→07:45
-  hole (instrument housekeeping) on 17 of 31 days. These 19 gaps poison up to 6
-  windows each, which is why 114 samples are rejected.
-- **Manifest**: 1349 samples after gap rejection (1463 before).
-- **Class balance**: ~76% of pixels are warm (`> 0.5`), ~24% cold. The cold class
-  is the minority — which is exactly why CSI must score it.
-- **Clipping**: ~0.6% of pixels sit exactly at 0.0, ~0.06% at 1.0.
-
-### Indicative results
-
-ConvLSTM (2 layers, `hidden_dim=64`), validation split, versus persistence:
-
-| metric | model | persistence | delta |
-|---|---|---|---|
-| MSE | 0.0100 | 0.0124 | −0.0024 |
-| SSIM | 0.536 | 0.468 | +0.068 |
-| CSI (cold, pooled) | 0.669 | 0.657 | +0.011 |
-
-The margin over persistence is thin. Treat "beats persistence convincingly" as
-the bar for any architecture change, not MSE in isolation.
-
-## 10. Known Caveats and Open Issues
-
-**Data coverage is the dominant limitation.** One month, one crop, one season
-means validation measures a few days' extrapolation within the monsoon, not
-generalization. Metrics are a sanity check, not a reliable model-selection
-signal. Roughly a year of data — or at minimum 3–4 months spread across
-seasons — is needed before results generalize; duration across regimes matters
-more than raw sample count.
-
-**Validation samples are highly autocorrelated.** Even with the boundary buffer,
-adjacent samples share `T-1` input frames, so the effective number of
-independent weather states is far below the nominal sample count.
-
-**No test set.** Validation drives both early stopping and best-checkpoint
-selection, so reported validation metrics are selection-biased upward. A third
-held-out split is needed before quoting final numbers.
-
-**Model output is unbounded.** `conv_last` has no sigmoid or clamp; predictions
-reach roughly `[-0.04, 1.03]`. This violates SSIM's data-range-1 assumption
-(which fails silently) and leaves CSI thresholding undefined outside `[0,1]`.
-
-**Missing data is encoded as maximum cloud.** `np.nan_to_num(nan=0.0)` runs
-*after* normalization, and 0.0 means 180K — the coldest cloud top. Sensor
-dropouts and off-disk pixels therefore become synthetic deep convection. Impact
-is small on the current inland crop but would be severe on a crop touching the
-disk edge. A mask channel or a neutral fill value is the real fix.
-
-**`_is_valid()`'s NaN check cannot fire.** It runs on `.npy` files that have
-already been through `nan_to_num`, so no NaN survives to be caught. A frame
-that was 90% NaN becomes 90% zeros — a plausible-looking giant cloud — and
-passes validation. Partial-corruption detection needs to happen in
-`preprocess.py`, before the fill.
-
-**`EarlyStopping(min_delta=0.001)` is coarse** relative to a validation MSE of
-~0.010, effectively demanding ~10% relative improvement per epoch and stopping
-prematurely.
-
-**No gradient clipping and no LR scheduler**, which matters more as `num_layers`
-grows and the recurrent stack deepens over `T` steps.
-
-**Checkpoints are named `model_epoch_{N}.pt` with no run or architecture
-identifier**, so successive runs with different `num_layers` interleave in
-`checkpoints/` and a stale file can be loaded against a mismatched config.
-Notebooks that hardcode a checkpoint filename are especially exposed.
-
-**Static crop.** Fixed geographic region; random or region-of-interest cropping
-would add spatial diversity.
-
-## 11. Environment
-
-Conda environment with GPU support (`torchgpu` / `sat-cloud`):
-
-- Python 3.11, PyTorch 2.6.0+cu124, CUDA 12.4.
-- `h5py`, `netCDF4`, `numpy`, `matplotlib`, `scipy`, `scikit-image`, `wandb`, `opencv`.
-- `nomkl` installed via conda to avoid `undefined symbol: omp_get_num_procs`
-  (MKL/OMP conflict) during visualization.
+The `chase-the-cloud` env is **incomplete** (no `yaml`). Use `torchgpu`.
 
 See `README.md` for setup and run commands.

@@ -91,12 +91,9 @@ class Trainer:
                     'persistence': inputs[:, -1, :targets.shape[1]],
                 }
 
+                # Unclipped: every metric scores what the model actually
+                # produced. The range is handled by normalising the inputs.
                 for name, pred in preds.items():
-                    # Clip first, then score everything on that one tensor.
-                    # Scoring loss on the raw output but SSIM and PSNR on a
-                    # clipped one made the three metrics describe different
-                    # tensors, so they disagreed about the same model.
-                    pred = pred.clamp(0.0, 1.0)
                     weighted[name][0] += self.criterion(pred, targets).item() * batch
                     weighted[name][1] += ssim(pred, targets).item() * batch
                     se, n = squared_error_counts(pred, targets)
@@ -146,6 +143,7 @@ class Trainer:
             'loss': loss,
         }, path)
         print(f"--- Saved checkpoint: {path} ---")
+        return path
 
 
 class EarlyStopping:

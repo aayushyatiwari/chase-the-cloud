@@ -20,6 +20,7 @@ MANIFEST="${MANIFEST:-data/manifest_full.json}"
 CHANNELS="${CHANNELS:-TIR1}"
 MODE="${MODE:-full}"          # full = keep whole sector, crop = old fixed window
 T="${T:-6}"
+STRIDE="${STRIDE:-7}"   # T+1 = non-overlapping sequences; 1 slides one frame
 
 # Files already present are skipped unless OVERWRITE=1.
 EXTRA=()
@@ -36,7 +37,7 @@ python -m src.preprocess \
 echo "Building manifest -> $MANIFEST"
 python -c "
 from src.manifest import build
-build('$OUT_DIR', T=$T, output_path='$MANIFEST')
+build('$OUT_DIR', T=$T, output_path='$MANIFEST', stride=$STRIDE)
 "
 
 echo "Done. Point config.yaml data.manifest_path at $MANIFEST"

@@ -1,4 +1,3 @@
-import json
 import random
 import shutil
 import numpy as np
@@ -11,9 +10,10 @@ from datetime import datetime
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch.utils.data import DataLoader
 from src.dataset import Clouds, tile_grid
+from src.manifest import split_indices
 from src.models.convlstm import ConvLSTM
 from src.models.simvp import SimVP
-from src.models.residual import BoundedOutput, ResidualWrapper
+from src.models.residual import ResidualWrapper
 from src.engine import Trainer, EarlyStopping
 from src.utils import latest_checkpoint
 import time
@@ -86,30 +86,30 @@ def main():
     print(f"Using device: {device}")
 
     # 3. Data Preparation
-    # Split by time window, then let each side pick its own crops. Splitting
-    # windows first keeps every crop of a timestamp on one side of the boundary.
-    # The T-window gap means no raw frame is shared across the split, because
-    # the manifest slides one frame at a time.
+    # Split by time only -- train and val share geography on purpose, since the
+    # model is deployed over this same sector. split_indices keeps every frame
+    # of a window inside one split, so no frame is shared across the boundary.
     T = config['data']['T']
     crop_size = config['data']['crop_size']
-    n_windows = len(json.load(open(config['data']['manifest_path'])))
-    train_size = int(config['data']['train_split'] * n_windows)
+
+    print("Splits:")
+    idx = split_indices(config['data']['manifest_path'], config['data']['splits'])
 
     common = dict(manifest_path=config['data']['manifest_path'], T=T, crop_size=crop_size)
 
     # Training crops move around every epoch, which is the whole point of
     # multi-crop: same number of steps, but new regions each time.
-    train_dataset = Clouds(**common, window_range=range(0, train_size), random_crop=True)
+    train_dataset = Clouds(**common, window_range=idx['train'], random_crop=True)
 
     # Validation uses a fixed grid so the metric measures the model, not which
     # crops happened to come up. val_stride thins the grid to keep it quick.
     grid = tile_grid(train_dataset.H, train_dataset.W, crop_size,
                      stride=config['data']['val_crop_stride'])
-    val_dataset = Clouds(**common, window_range=range(train_size + T, n_windows), crops=grid)
+    val_dataset = Clouds(**common, window_range=idx['val'], crops=grid)
 
     print(f"Frames are {train_dataset.C}x{train_dataset.H}x{train_dataset.W}, crop {crop_size}")
-    print(f"Train: {len(train_dataset)} samples ({train_size} windows, 1 random crop each)")
-    print(f"Val:   {len(val_dataset)} samples ({n_windows - train_size - T} windows x {len(grid)} crops)")
+    print(f"Train: {len(train_dataset)} samples ({len(idx['train'])} windows, 1 random crop each)")
+    print(f"Val:   {len(val_dataset)} samples ({len(idx['val'])} windows x {len(grid)} crops)")
 
     train_loader = DataLoader(
         train_dataset, 
@@ -150,16 +150,11 @@ def main():
     else:
         raise ValueError(f"Unknown model.type: {model_type!r} (expected 'convlstm' or 'simvp')")
 
-    # Predict the change from the last frame rather than the frame itself.
-    # Either way the final prediction is bounded to [0,1], so the two modes are
-    # trained against the same bounded objective and can be compared. They are
-    # bounded differently because they have to be -- see BoundedOutput.
+    # Neither mode bounds its output, so the two stay comparable.
     if config['model'].get('residual'):
         model = ResidualWrapper(model, out_channels=1).to(device)
         arch_tag += "_res"
         print("Residual mode: model predicts the change from the last input frame")
-    else:
-        model = BoundedOutput(model).to(device)
 
 
     # float() guards against YAML parsing e.g. 3e-5 as a string
@@ -189,6 +184,7 @@ def main():
         min_delta=float(config['train'].get('early_stopping_min_delta', 1e-5)),
     )
     best_val_loss = float('inf')
+    best_ckpt = None
 
     # 5. Initialize the Trainer (The Engine)
     # e.g. 20260828_161422_convlstm_L3_h64 -- timestamp plus architecture, so a
@@ -276,7 +272,7 @@ def main():
 
         if val_metrics['loss'] < best_val_loss:
             best_val_loss = val_metrics['loss']
-            trainer.save_checkpoint(epoch, val_metrics['loss']) 
+            best_ckpt = trainer.save_checkpoint(epoch, val_metrics['loss'])
 
         # early stopping
         if early.step(val_metrics['loss']):
@@ -288,6 +284,30 @@ def main():
     print(f"Training Finished! {epochs_run} epochs in {fmt_duration(total)} "
           f"(average {fmt_duration(total / max(epochs_run, 1))} per epoch)")
     print(f"Best validation loss: {best_val_loss:.4f}")
+
+    # 8. Optionally score the best checkpoint on the held-out test split.
+    # Run once, at the end. It stops being an unbiased estimate the moment it
+    # is used to make a decision.
+    if config['data'].get('evaluate_test'):
+        if best_ckpt is None:
+            print("No checkpoint improved on the resumed loss -- skipping the test pass.")
+        else:
+            test_dataset = Clouds(**common, window_range=idx['test'], crops=grid)
+            test_loader = DataLoader(
+                test_dataset,
+                batch_size=config['train']['batch_size'],
+                shuffle=False,
+                num_workers=config['train']['num_workers'],
+            )
+            print(f"\nScoring {best_ckpt} on the test split "
+                  f"({len(test_dataset)} samples, {len(idx['test'])} windows x {len(grid)} crops)")
+            trainer.load_checkpoint(best_ckpt)
+            test_metrics = trainer.validate(test_loader)
+            print(f"    Test Loss: {test_metrics['loss']:.4f}  (persistence {test_metrics['persistence_loss']:.4f})")
+            print(f"    Test SSIM: {test_metrics['ssim']:.4f}  (persistence {test_metrics['persistence_ssim']:.4f})")
+            print(f"    Test PSNR: {test_metrics['psnr']:.2f} dB  (persistence {test_metrics['persistence_psnr']:.2f} dB)")
+            if config['logging']['use_wandb']:
+                wandb.log({f"test_{k}": v for k, v in test_metrics.items()})
 
 if __name__ == "__main__":
     main()
