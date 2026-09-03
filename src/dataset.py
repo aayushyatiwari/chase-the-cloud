@@ -36,15 +36,12 @@ class Clouds(Dataset):
     used for all frames of that window -- moving the crop between frames would
     look like camera motion and the model would try to learn it as cloud motion.
 
-    Two modes:
-      crops=[(row, col), ...]  every window is paired with every crop, in a
-                               fixed order. Reproducible, so use it for
-                               validation, where a metric has to mean the same
-                               thing every epoch.
-      random_crop=True         one crop per window, at a random position that
-                               changes every epoch. Cheap augmentation: the
-                               epoch stays the same length but keeps showing
-                               new regions.
+    The frame is tiled by crop_stride and every window is paired with every
+    tile, in a fixed order. All three splits tile the same way, so each pixel is
+    trained on and scored equally. A random crop position instead would sample
+    the interior 65,536x more often than the corners -- over half the sector
+    sits within one crop-width of an edge -- while val and test covered it
+    uniformly.
 
     window_range selects which manifest entries this dataset covers. Slicing by
     window (not after crops are expanded) keeps the train/validation split
@@ -52,7 +49,7 @@ class Clouds(Dataset):
     """
 
     def __init__(self, manifest_path='data/manifest.json', T=6, window_range=None,
-                 crop_size=256, crops=None, random_crop=False):
+                 crop_size=256, crop_stride=None):
         with open(manifest_path) as f:
             samples = json.load(f)
         self.samples = [samples[i] for i in (window_range if window_range is not None
@@ -64,30 +61,18 @@ class Clouds(Dataset):
             )
         self.T = T
         self.crop_size = crop_size
-        self.crops = crops
-        self.random_crop = random_crop
 
         # Frame shape, read from a header only (mmap), not the whole array.
         probe = np.load(self.samples[0]['target_frame'], mmap_mode='r')
         self.C, self.H, self.W = probe.shape
+        self.crops = tile_grid(self.H, self.W, crop_size, crop_stride)
 
     def __len__(self):
-        return len(self.samples) * (len(self.crops) if self.crops else 1)
+        return len(self.samples) * len(self.crops)
 
     def __getitem__(self, idx):
-        if self.crops:
-            window_idx, crop_idx = divmod(idx, len(self.crops))
-            top, left = self.crops[crop_idx]
-        else:
-            window_idx = idx
-            if self.random_crop:
-                # torch's RNG, not numpy's: DataLoader reseeds torch per worker,
-                # but every worker inherits the same numpy seed and would draw
-                # identical crops.
-                top = torch.randint(0, self.H - self.crop_size + 1, (1,)).item()
-                left = torch.randint(0, self.W - self.crop_size + 1, (1,)).item()
-            else:
-                top = left = 0
+        window_idx, crop_idx = divmod(idx, len(self.crops))
+        top, left = self.crops[crop_idx]
 
         sample = self.samples[window_idx]
         # Load failures are raised, not substituted: silently swapping in a

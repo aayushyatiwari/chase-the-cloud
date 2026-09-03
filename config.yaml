@@ -7,16 +7,16 @@ data:
   # Inclusive date ranges. 16 and 24 July 2024 belong to no split: they are
   # buffer days keeping train, val and test more than a day apart.
   splits:
-    train: ["2023-07-01", "2024-07-15"]   # 1960 windows, 73%
-    val:   ["2024-07-17", "2024-07-23"]   #  310 windows, 12%
-    test:  ["2024-07-25", "2024-07-31"]   #  322 windows, 12%
+    train: ["2023-07-01", "2024-07-15"]   #  291 windows, 73%
+    val:   ["2024-07-17", "2024-07-23"]   #   46 windows, 12%
+    test:  ["2024-07-25", "2024-07-31"]   #   47 windows, 12%
 
   # Val is a training signal (early stopping, LR schedule, checkpoint choice),
   # so it is not an unbiased estimate. Turn this on once, at the end.
   evaluate_test: false
-  # Spacing of the fixed validation crop grid. 256 = non-overlapping (36 crops
-  # on a 1616x1737 sector); raise it for fewer crops and quicker validation.
-  val_crop_stride: 512
+  # Tile spacing for every split. 256 = non-overlapping, 49 tiles on a
+  # 1616x1737 sector (6x6 plus a flush row and column against the far edges).
+  crop_stride: 256
 
 # Training Hyperparameters
 train:
@@ -56,5 +56,5 @@ model:
 
 # Logging
 logging:
-  project: "cloud-diffusion"
+  project: "cloud-diffusion-v2"
   use_wandb: true

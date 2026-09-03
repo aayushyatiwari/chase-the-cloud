@@ -60,8 +60,7 @@ up solar reflection. Fix before enabling that channel.
 ### Orientation (easy to get backwards)
 
 Cold cloud is the **LOW** end. 0.0 = 180 K = highest/coldest tops; 1.0 = 340 K =
-warm surface. Cloud thresholds must test `value < threshold`. This silently
-inverted CSI once.
+warm surface. Any cloud threshold must test `value < threshold`.
 
 Target distribution, measured: mean 0.596, median 0.646, std 0.157. Only 1.52%
 of pixels below 0.15 and 1.05% above 0.85.
@@ -147,9 +146,6 @@ the parameterization. Not implemented — decide before running the matrix.
 - **SSIM** — Wang et al., 11×11 Gaussian σ=1.5, stabilizers assume data range 1.0.
 - **PSNR** — pooled as squared error and elements, converted to dB once at the
   end. Averaging per-batch PSNR averages logarithms.
-- **CSI** — implemented in `utils.py` (`csi_counts` / `csi_from_counts`, pooled,
-  returns NaN on an empty denominator) but **not currently wired into
-  `validate()`**.
 
 Persistence is not optional bookkeeping. Over 30 minutes clouds move little, so
 persistence is strong and absolute numbers are meaningless without it. Quote
@@ -250,15 +246,12 @@ They **do** crop into patches — this is not a whole-frame method.
 ## 11. Open items
 
 - [x] `src/manifest.py`: stride parameter, built at stride 7 (399 windows).
-- [ ] `train.py` / `Clouds`: tiled training crops (49) instead of `random_crop`.
+- [x] `Clouds` tiles the frame itself from `crop_stride`; all three splits
+      use the same 49 tiles. `random_crop` and CSI removed.
 - [ ] **New wandb project** — old runs used 180–300 K normalization, a sigmoid
       output head, clamped metrics and a fractional split. Nothing before
       2026-09-03 is comparable.
 - [ ] Decide the frame-path bias init (§6).
-- [ ] Wire CSI into `validate()`, or drop it from `utils.py`.
-- [ ] `val_crop_stride: 512` gives 16 tiles → 736 val samples. At 256 (49 tiles)
-      it is 2,254 and matches train coverage. Tile count now drives val sample
-      count, since stride-7 leaves only 46 val windows.
 - [ ] Restore `epochs` to ~50 and pick `batch_size` for the target GPU.
 - [ ] Rotate the MOSDAC password — it is in plaintext in
       `~/code/chase-the-cloudv2/data/get_data.sh` (not in any git repo).
@@ -269,19 +262,16 @@ They **do** crop into patches — this is not a whole-frame method.
 |---|---|---|
 | 1 | Windows built across missing frames → mislabeled lead time | `_is_continuous()` gap rejection |
 | 2 | Lexicographic frame sort scrambles across months | sort by parsed timestamp |
-| 3 | CSI thresholded `> 0.5`, scoring the warm majority | threshold `< 0.5` |
-| 4 | CSI averaged per-batch ratios | pooled counts |
-| 5 | CSI returned 0.0 on empty denominator | returns NaN |
-| 6 | No baseline | persistence in `validate()` |
-| 7 | Loader substituted a random sample on failure, leaking splits | raises |
-| 8 | Contiguous index split shared frames across the boundary | date splits, whole-window containment, buffer days |
-| 9 | 180–300 K normalization clipped 8.46% of targets to 1.0 | 180–340 K, the LUT span |
-| 10 | Clamp in `ResidualWrapper` killed gradients outside range | removed |
-| 11 | Sigmoid on the frame path only → different objective per cell | removed |
-| 12 | Metrics clamped before scoring | unclipped |
-| 13 | Fractional split moved silently when data was added | date-based splits |
-| 14 | No test set | third split, gated behind `evaluate_test` |
-| 15 | Random crops sampled interior 65,536× more than corners | tiled crops |
+| 3 | No baseline | persistence in `validate()` |
+| 4 | Loader substituted a random sample on failure, leaking splits | raises |
+| 5 | Contiguous index split shared frames across the boundary | date splits, whole-window containment, buffer days |
+| 6 | 180–300 K normalization clipped 8.46% of targets to 1.0 | 180–340 K, the LUT span |
+| 7 | Clamp in `ResidualWrapper` killed gradients outside range | removed |
+| 8 | Sigmoid on the frame path only → different objective per cell | removed |
+| 9 | Metrics clamped before scoring | unclipped |
+| 10 | Fractional split moved silently when data was added | date-based splits |
+| 11 | No test set | third split, gated behind `evaluate_test` |
+| 12 | Random crops sampled interior 65,536× more than corners | tiled crops |
 
 ## 13. Environment
 

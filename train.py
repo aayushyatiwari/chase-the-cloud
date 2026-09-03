@@ -9,7 +9,7 @@ import wandb
 from datetime import datetime
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch.utils.data import DataLoader
-from src.dataset import Clouds, tile_grid
+from src.dataset import Clouds
 from src.manifest import split_indices
 from src.models.convlstm import ConvLSTM
 from src.models.simvp import SimVP
@@ -95,20 +95,16 @@ def main():
     print("Splits:")
     idx = split_indices(config['data']['manifest_path'], config['data']['splits'])
 
-    common = dict(manifest_path=config['data']['manifest_path'], T=T, crop_size=crop_size)
+    # One tiling for every split, so each pixel is trained on and scored equally.
+    common = dict(manifest_path=config['data']['manifest_path'], T=T, crop_size=crop_size,
+                  crop_stride=config['data']['crop_stride'])
 
-    # Training crops move around every epoch, which is the whole point of
-    # multi-crop: same number of steps, but new regions each time.
-    train_dataset = Clouds(**common, window_range=idx['train'], random_crop=True)
-
-    # Validation uses a fixed grid so the metric measures the model, not which
-    # crops happened to come up. val_stride thins the grid to keep it quick.
-    grid = tile_grid(train_dataset.H, train_dataset.W, crop_size,
-                     stride=config['data']['val_crop_stride'])
-    val_dataset = Clouds(**common, window_range=idx['val'], crops=grid)
+    train_dataset = Clouds(**common, window_range=idx['train'])
+    val_dataset = Clouds(**common, window_range=idx['val'])
+    grid = train_dataset.crops
 
     print(f"Frames are {train_dataset.C}x{train_dataset.H}x{train_dataset.W}, crop {crop_size}")
-    print(f"Train: {len(train_dataset)} samples ({len(idx['train'])} windows, 1 random crop each)")
+    print(f"Train: {len(train_dataset)} samples ({len(idx['train'])} windows x {len(grid)} crops)")
     print(f"Val:   {len(val_dataset)} samples ({len(idx['val'])} windows x {len(grid)} crops)")
 
     train_loader = DataLoader(
@@ -292,7 +288,7 @@ def main():
         if best_ckpt is None:
             print("No checkpoint improved on the resumed loss -- skipping the test pass.")
         else:
-            test_dataset = Clouds(**common, window_range=idx['test'], crops=grid)
+            test_dataset = Clouds(**common, window_range=idx['test'])
             test_loader = DataLoader(
                 test_dataset,
                 batch_size=config['train']['batch_size'],

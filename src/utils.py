@@ -62,7 +62,7 @@ def squared_error_counts(pred, target):
     """
     Sum of squared errors, and the number of elements behind it.
 
-    Returned raw for the same reason as csi_counts: PSNR has to be formed once
+    Returned raw because PSNR has to be formed once
     from a whole epoch's pooled MSE, not averaged over batches. See psnr_from_mse.
     """
     return torch.sum((pred - target) ** 2).item(), pred.numel()
@@ -93,41 +93,3 @@ def psnr(pred, target, data_range=1.0):
     """
     se, n = squared_error_counts(pred, target)
     return torch.tensor(psnr_from_mse(se / n, data_range), device=pred.device)
-
-
-def csi_counts(preds, targets, threshold=0.5):
-    """
-    Contingency counts (hits, misses, false_alarms) for the cold-cloud class.
-
-    preprocess.py normalizes so that cold cloud tops -> 0 and the warm surface
-    -> 1, so a cloud pixel is one BELOW the threshold. The default 0.5
-    corresponds to 240K, a standard cold cloud-top cutoff.
-
-    Returns raw counts so they can be pooled across a whole epoch before
-    forming the ratio: CSI is a ratio of sums, not a mean of per-batch ratios.
-    """
-    preds_bin = (preds < threshold).float()
-    targets_bin = (targets < threshold).float()
-
-    hits = (preds_bin * targets_bin).sum().item()
-    misses = ((1 - preds_bin) * targets_bin).sum().item()
-    false_alarms = (preds_bin * (1 - targets_bin)).sum().item()
-    return hits, misses, false_alarms
-
-
-def csi_from_counts(hits, misses, false_alarms):
-    """
-    Critical Success Index (CSI) / Threat Score.
-    CSI = Hits / (Hits + Misses + FalseAlarms). Higher is better.
-    True negatives are excluded, so clear sky cannot inflate the score.
-    Undefined (NaN) when no cloud is present in either prediction or target.
-    """
-    denominator = hits + misses + false_alarms
-    return hits / denominator if denominator > 0 else float('nan')
-
-
-def calculate_csi(preds, targets, threshold=0.5):
-    """CSI for a single batch. Prefer pooling csi_counts over a full epoch."""
-    return torch.tensor(
-        csi_from_counts(*csi_counts(preds, targets, threshold))
-    ).to(preds.device)
