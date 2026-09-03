@@ -1,5 +1,4 @@
 import argparse
-import os
 from dataclasses import dataclass
 from pathlib import Path
 import numpy as np
@@ -22,21 +21,18 @@ DEFAULT_NORM_MIN = 180.0
 DEFAULT_NORM_MAX = 300.0
 DEFAULT_FILL_VALUE = 0.0
 
-# Each channel needs its own min/max. Water vapour tops out near 267K because it
-# sees the upper troposphere, so reusing TIR1's range would squash all of its
-# detail into the bottom of [0,1].
-#
-# TIR1/TIR2 span the sensor's own temperature LUT (179.86-340.06K). An earlier
-# 180-300K ceiling clipped 8.5% of target pixels to exactly 1.0: daytime land
-# over India in July reaches 333K.
+# Per-channel true min/max, measured over every pixel of all 2964 raw files.
+# Water vapour sits far colder than the window channels because it sees the
+# upper troposphere, so reusing TIR1's range would squash its detail into the
+# bottom of [0,1].
 NORM_RANGES = {
-    'TIR1': (180.0, 340.0),
-    'TIR2': (180.0, 340.0),
-    'WV':   (200.0, 270.0),
-    'MIR':  (230.0, 315.0),
+    'TIR1': (179.86, 335.84),
+    'TIR2': (179.93, 340.07),
+    'WV':   (179.69, 308.57),
+    'MIR':  (179.69, 339.79),
 }
 
-DEFAULT_CHANNELS = ('TIR1',)
+DEFAULT_CHANNELS = ('TIR1','TIR2', 'WV', 'MIR')
 
 def h5_to_bt(h5_path, channel='TIR1'):
     """Read one channel and turn raw sensor counts into brightness temperature."""
@@ -52,7 +48,7 @@ def normalize(bt, norm_min=DEFAULT_NORM_MIN, norm_max=DEFAULT_NORM_MAX):
     normalized = (bt - norm_min) / (norm_max - norm_min)
     return np.clip(normalized, 0.0, 1.0)
 
-def process_file(h5_path, out_path, channels, crop, fill_value):
+def process_file(h5_path, out_path, channels, crop, fill_value, norm_ranges=NORM_RANGES):
     """
     Turn one HDF5 file into one .npy of shape (C, H, W).
 
@@ -67,7 +63,7 @@ def process_file(h5_path, out_path, channels, crop, fill_value):
             bt = h5_to_bt(h5_path, name)
             if crop is not None:
                 bt = bt[crop.row_start:crop.row_end, crop.col_start:crop.col_end]
-            norm_min, norm_max = NORM_RANGES[name]
+            norm_min, norm_max = norm_ranges[name]
             bt = normalize(bt, norm_min=norm_min, norm_max=norm_max)
             bt = np.nan_to_num(bt, nan=fill_value, posinf=fill_value, neginf=fill_value)
             planes.append(bt)
@@ -79,7 +75,8 @@ def process_file(h5_path, out_path, channels, crop, fill_value):
         print(f"Error processing {h5_path.name}: {e}")
         return False
 
-def process_all(raw_dir, out_dir, channels=DEFAULT_CHANNELS, crop=None, fill_value=DEFAULT_FILL_VALUE, overwrite=False):
+def process_all(raw_dir, out_dir, channels=DEFAULT_CHANNELS, crop=None, fill_value=DEFAULT_FILL_VALUE,
+                overwrite=False):
     files = sorted(Path(raw_dir).glob("*.h5"))
     if not files:
         print(f"No .h5 files found in {raw_dir}")
