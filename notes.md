@@ -1,284 +1,219 @@
-# Technical Notes: Cloud Motion Nowcasting on INSAT-3DR
+# Chase the Cloud
 
-Last substantive update: 2026-09-03.
+Short-term cloud forecasting from Indian weather-satellite images. Give the
+model the last 3 hours of sky and it predicts what the sky looks like 30
+minutes from now.
 
-## 1. Task
+```
+ 06:00   06:30   07:00   07:30   08:00   08:30        09:00
+ [img]   [img]   [img]   [img]   [img]   [img]   ->   [predicted]
+ <------------- 6 frames in ----------------->        1 frame out
+```
 
-Given `T=6` consecutive TIR1 frames at 30-minute spacing, predict the next
-single frame (30 minutes ahead). Not a multi-frame rollout.
+---
 
-Experiment matrix, four cells:
+## The dataset
 
-|  | frame prediction | residual (predict the change) |
-|---|---|---|
-| ConvLSTM | `src/models/convlstm.py` | `+ ResidualWrapper` |
-| SimVP | `src/models/simvp.py` | `+ ResidualWrapper` |
-
-`src/explore.py` is GOES/NetCDF-era legacy and not part of the pipeline.
-
-## 2. Data
-
-INSAT-3DR L1C from MOSDAC, `ASIA_MER` sector, HDF5.
+Images from **INSAT-3D / 3DR**, the Indian weather satellites, over the Asia
+sector (roughly 10°S–45°N, 44°E–110°E).
 
 | | |
 |---|---|
-| frame shape | 1616 × 1737 (rows × cols) |
-| resolution | 4.0 km/pixel (verified from the file's X/Y axes: 6,946 km over 1737 cols) |
-| extent | 44.5–110°E, 10°S–45.5°N |
-| area | 41.2 M km² |
-| cadence | 30 min |
-| raw frames | 2,964 across 62 days — July 2023 (1,469) + July 2024 (1,495) |
-| raw size | 72 GB; processed float32 full-sector 32 GB |
+| Source files | 2964 HDF5 granules, July 2023 – July 2024 |
+| Usable frames | 2961 (3 were blank) |
+| One frame every | 30 minutes |
+| Image size | 1616 × 1737 pixels, one pixel ≈ 4 km |
+| Channels used | TIR1, TIR2, WV, MIR |
+| Size on disk | 66.5 GB |
 
-Files carry counts plus a 1024-entry LUT: `BT = IMG_TIR1_TEMP[IMG_TIR1[0]]`.
-LUT span is 179.86–340.06 K for TIR1/TIR2, 179.69–325.34 K for WV,
-179.69–339.79 K for MIR.
+**What the four channels are.** Each is the same scene photographed at a
+different wavelength, and each shows something different:
 
-## 3. Preprocessing (`src/preprocess.py`)
+- **TIR1** (10.8 µm) — the main cloud picture. Cold = high cloud tops = storms.
+  This is the one we predict.
+- **TIR2** (12.0 µm) — nearly the same view; helps identify thin cirrus.
+- **WV** (6.9 µm) — water vapour high in the atmosphere. Shows the airflow
+  steering the clouds.
+- **MIR** (3.9 µm) — useful for low cloud and fog.
 
-HDF5 → BT via LUT → normalize → NaN fill → `.npy` (C, H, W) in
-`data/processed_full/`. Full sector kept; no crop at this stage.
+The satellite also records visible and shortwave channels. We skipped those:
+they go black at night, and we need a forecaster that works around the clock.
 
-`NORM_RANGES['TIR1'] = (180.0, 340.0)` — the sensor's own LUT span.
+---
 
-**This was 180–300 K until 2026-09-03 and that was a bug.** Daytime land over
-India in July reaches 333 K, so the old ceiling pinned **8.46%** of all target
-pixels to exactly 1.0 — 15–21% of the sector on midday frames, 0% at night.
-Saturated targets are invisible to the loss: it cannot distinguish a correct
-prediction from an overshoot. Measured after the fix, over all 2,683 targets:
+## Preprocessing decisions
 
-| | before | after |
+### 1. We store the satellite's raw numbers, not temperatures
+
+A satellite pixel is not a temperature. It is a **count** — a whole number from
+0 to 1023 that the detector produced. Each file ships a small conversion table
+that says what its counts mean:
+
+```
+count  555  ->  292.31 K
+count  557  ->  292.01 K
+count  562  ->  291.27 K
+```
+
+The obvious approach is to convert everything to temperature once, and save
+that. We don't. We save the counts and keep the tables in a separate 27 MB
+file, then convert while the model is being fed.
+
+Why: a count needs only 10 bits; a temperature needs 32. Storing counts is
+**half the size and loses nothing** — the conversion is a lookup, so it can be
+redone any time. It also means we can change our minds about anything
+downstream without touching the 66 GB again.
+
+### 2. Every file gets its own conversion table
+
+The tables are not identical across files. The satellite is recalibrated as its
+detectors drift, by up to 13 K on the MIR channel. So count 555 means one
+temperature in a July file and a slightly different one in a January file.
+
+Using each file's own table is what makes the frames **comparable**. Reusing one
+table everywhere would inject fake variation the model would try to learn as
+weather.
+
+### 3. But the 0-to-1 scaling is global
+
+After converting to temperature, every frame is squeezed into the range 0–1
+using **one fixed range per channel**, the same for all 2961 frames:
+
+```json
+{ "TIR1": [179.86, 335.84], "TIR2": [179.93, 340.07],
+  "WV":   [179.69, 308.57], "MIR": [179.69, 339.79] }
+```
+
+So 180 K is always 0.0 and 335.84 K is always 1.0. Checked against all 8.3
+billion pixels: the real data lands exactly inside these bounds, so nothing is
+being cut off.
+
+### 4. Three dead frames removed
+
+Three granules came back blank or near-blank and were dropped:
+
+```
+3RIMG_31JUL2023_0420   100% empty
+3RIMG_11JUL2024_2015    98% empty
+3RIMG_22JUL2024_2057    11% empty
+```
+
+### 5. Whole images saved, small squares taken later
+
+We keep the full 1616 × 1737 image on disk and cut 256 × 256 squares only when
+training. Each image yields a 7 × 7 grid of 49 squares. Cutting at training
+time means the square size can change without redoing anything.
+
+**Files produced:**
+
+```
+data/processed_counts/*.npy     2961 frames, raw counts        66.5 GB
+data/luts.npz                   the conversion tables          27 MB
+data/norm_ranges.json           the 0-to-1 ranges              112 B
+data/manifest_counts.json       which 7 frames form a sequence 328 KB
+```
+
+---
+
+## Models and their configs
+
+Two architectures, one per GPU, same data and same settings otherwise — so the
+comparison is fair.
+
+| | **ConvLSTM** | **SimVP** |
 |---|---|---|
-| pixels == 1.0 | 8.4600% | **0.0000%** |
-| pixels == 0.0 | 0.2336% | 0.2033% |
+| Idea | Watches frames in order, carrying a memory forward | Squashes all 6 frames at once and reconstructs |
+| Parameters | 747 K | 6.8 M |
+| Config | `config.yaml` | `config_simvp.yaml` |
+| Size | 3 layers, 64 hidden channels | hid_S 64, hid_T 256, N_S 4, N_T 4 |
+| Batch size | 8 | 24 |
+| Est. per epoch | ~70 min | ~25 min |
 
-The remaining 0.20% at zero is the LUT floor at 179.86 K, irreducible.
+Both take **all 4 channels in** and predict **TIR1 only** out. Extra channels
+are allowed to help without having to be predicted themselves — like glancing at
+the wind to guess where a cloud goes, without forecasting the wind.
 
-`MIR: (230.0, 315.0)` has the same disease — LUT reaches 339.8 K and MIR picks
-up solar reflection. Fix before enabling that channel.
+---
 
-### Orientation (easy to get backwards)
+## Training methodology
 
-Cold cloud is the **LOW** end. 0.0 = 180 K = highest/coldest tops; 1.0 = 340 K =
-warm surface. Any cloud threshold must test `value < threshold`.
+### Splitting by date, not at random
 
-Target distribution, measured: mean 0.596, median 0.646, std 0.157. Only 1.52%
-of pixels below 0.15 and 1.05% above 0.85.
+```
+train   2023-07-01 .. 2024-07-15     290 sequences
+  (16 July: buffer, unused)
+val     2024-07-17 .. 2024-07-23      46 sequences
+  (24 July: buffer, unused)
+test    2024-07-25 .. 2024-07-31      47 sequences
+```
 
-### Known gap
+Random splitting would be cheating: frames 30 minutes apart look almost
+identical, so the model would be tested on weather it had already seen. Splitting
+by date, with a buffer day between, keeps the test genuinely unseen.
 
-`np.nan_to_num(nan=0.0)` runs *after* normalization, so missing data becomes
-180 K — synthetic deep convection. No NaNs are present in the current corpus
-(checked), but this bites the moment a frame with dropouts arrives. `_is_valid()`
-in manifest.py cannot catch it either, since it inspects post-fill `.npy`.
+With 49 squares per frame, 290 train sequences become **14,210 training
+examples**.
 
-## 4. Manifest (`src/manifest.py`)
+### Settings
 
-Sorts by **parsed timestamp**, not filename — lexicographic ordering scrambles
-across months (`01AUG` < `01JUL` < `01JUN`). Rejects any window whose
-consecutive frames are not one 30-min step apart (±5 min tolerance), so no
-window has a mislabeled lead time. The July 2023 → July 2024 seam is dropped
-automatically by this check.
-
-**Built at stride 7 (non-overlapping): 399 windows**, 169 rejected on gaps, 0
-invalid. Verified disjoint — 2,793 frame references, 2,793 distinct.
-
-At stride 1 the same data gave 2,683 windows, but adjacent windows share 6 of 7
-frames, so that was ~396 independent sequences wearing a 6.8× inflated number.
-`build(..., stride=T+1)` partitions instead. A rejected window still advances by
-1, so a gap costs only the windows spanning it rather than knocking the whole
-partition out of phase.
-
-## 5. Splits (`config.yaml` → `manifest.split_indices`)
-
-Date ranges, **not fractions**. A fraction silently moves when data is added:
-`train_split: 0.8` meant "through 25 Jul 2023" before the 2024 merge and would
-have meant "through 19 Jul 2024" after, making no metric comparable across the
-change.
-
-| split | dates | days | windows | × 49 tiles |
-|---|---|---|---|---|
-| train | 2023-07-01 → 2024-07-15 | 46 | 291 | 14,259 |
-| val | 2024-07-17 → 2024-07-23 | 7 | 46 | 2,254 |
-| test | 2024-07-25 → 2024-07-31 | 7 | 47 | 2,303 |
-
-16 and 24 July 2024 belong to no split — buffer days. The 11–12 July 2024
-acquisition gap (13 of 48 windows on the 11th) sits inside train.
-
-A window joins a split only if **every one of its 7 frames** is inside the
-range, so nothing reaches across a boundary for its inputs.
-
-**Verified**, not assumed: zero shared windows and **zero shared frames**
-between every pair of splits, and all 24 hours present in each split so the
-diurnal cycle is represented identically.
-
-`evaluate_test: false`. Val drives early stopping, the LR schedule and
-checkpoint selection, so it is not an unbiased estimate. Run test once, at the
-end.
-
-## 6. Output convention: nothing is bounded
-
-No sigmoid, no clamp, anywhere — not in training, not in evaluation, not on the
-residual path. Both architectures end in a plain Conv2d with no activation;
-`ResidualWrapper` adds the last frame to it.
-
-Reasoning: targets are already inside [0,1] because the **inputs** were
-normalized, so MSE penalizes drift on its own. A clamp in training has zero
-gradient outside the range, so any pixel that wanders out can never be pulled
-back. And a squashing head on one path but not the other would mean the four
-cells train against different objectives — any measured difference could be the
-parameterization or could be the nonlinearity, with no way to separate them.
-
-Removed 2026-09-03: `clamp(0,1)` in `ResidualWrapper.forward`, `BoundedOutput`
-(sigmoid) on the frame path, `clamp(0,1)` in `Trainer.validate`.
-
-**Open:** the frame path now starts near 0 while the target mean is 0.596; the
-residual path starts at persistence. Initializing the final conv bias to the
-train-split mean would equalize the starting points so the comparison isolates
-the parameterization. Not implemented — decide before running the matrix.
-
-## 7. Metrics (`src/utils.py`, `src/engine.py`)
-
-`Trainer.validate` returns loss / SSIM / PSNR for the model and for a
-**persistence** forecast (repeat the last input frame) on the same batches.
-
-- **MSE** — the objective.
-- **SSIM** — Wang et al., 11×11 Gaussian σ=1.5, stabilizers assume data range 1.0.
-- **PSNR** — pooled as squared error and elements, converted to dB once at the
-  end. Averaging per-batch PSNR averages logarithms.
-
-Persistence is not optional bookkeeping. Over 30 minutes clouds move little, so
-persistence is strong and absolute numbers are meaningless without it. Quote
-every result as a delta against persistence.
-
-Note when comparing to published work: **we forecast 30 minutes, the FY-2G paper
-forecasts 1 hour.** Ours is the easier lead time.
-
-## 8. Sampling: why tiling, not random crops
-
-A 256×256 crop is 1/43 of the sector, so training has to crop. Random crops are
-badly non-uniform:
-
-| pixel | times trained on in 100 epochs |
+| | |
 |---|---|
-| interior | 3.25× |
-| edge midpoint | 0.013× |
-| corner | 0.00005× |
+| Loss | Mean squared error |
+| Optimiser | Adam |
+| Learning rate | 0.0001 |
+| LR schedule | halve it after 3 epochs with no improvement, floor 1e-6 |
+| Max epochs | 50 |
+| Early stopping | give up after 10 epochs with no improvement |
+| Seed | 42 |
 
-Interior pixels are sampled **65,536×** more often than corners — a row-0 pixel
-is reachable from one crop offset, an interior pixel from 256. The undersampled
-band is 255 px deep on every side, **51.7% of the sector**, and after 100 epochs
-14% of the frame has under a 50% chance of ever being seen.
+**What the learning rate does.** It is the size of the step the model takes when
+correcting itself. Too big and it overshoots the answer; too small and it takes
+forever. Starting at 0.0001 and halving it when progress stalls is the usual
+compromise: big strides early, careful shuffling later.
 
-That band is real weather, not off-limb space: 6.3% cloud fraction vs 10.2%
-interior, mean |Δ30 min| 0.032 vs 0.037.
+### The score to beat
 
-And val/test use `tile_grid`, which covers uniformly — so the current setup
-trains center-heavy and evaluates uniformly. That is a train/eval mismatch that
-biases every cell equally and for reasons unrelated to the thing being measured.
+Every validation pass also scores **persistence** — the forecast "in 30 minutes
+it will look exactly like it does now." Over half an hour that is a
+surprisingly good guess, and it is the honest baseline. A model that doesn't
+clearly beat persistence has learned nothing about how clouds move.
 
-**Fix: tile the sector.** `tile_grid(1616, 1737, 256, stride=256)` gives 49
-tiles (6×6 plus a flush row and column against the right/bottom edges, which
-overlap slightly). Every pixel used, deterministic, identical to val/test.
+Reported each epoch: loss, SSIM (how similar the images look), PSNR (error in
+decibels) — model and persistence side by side.
 
-Do **not** copy the paper's 128→64 center-output design. It exists because
-clouds advect into a patch from outside the model's view. At 14.35 m/s and a
-30-minute step, cloud moves 6.5 px at 4 km, so 95% of a 256 patch is retained,
-versus 88% for their 64 patch at hourly steps. They spend 75% of their pixels as
-non-targets to fix a 12% problem; for us it is a 5% problem.
+---
 
-## 9. Training budget
+## Running it
 
-Stride 7 removes 6.7× redundancy; tiling adds 49× real coverage. Stacking both
-is what made this look unaffordable.
+```bash
+# one-off preprocessing, from raw granules
+./run_preprocess.sh
 
-| | samples/epoch |
-|---|---|
-| today (1 random crop) | 1,960 |
-| stride 1 × 49 tiles | 96,040 |
-| **stride 7 × 49 tiles** | **14,259** (291 sequences × 49) |
-| FY-2G paper | 12,800 (800 × 16) |
+# check shapes, memory and epoch time without committing to a run
+python train.py --dry-run
 
-50 epochs = 712,950 samples, against the paper's 640,000. Comparable, and at
-14,259/epoch an ordinary training loop works — 50 validation checkpoints, no
-chunked-epoch machinery needed.
+# the two experiments, one per GPU
+CUDA_VISIBLE_DEVICES=0 python train.py
+CUDA_VISIBLE_DEVICES=1 python train.py --config config_simvp.yaml
+```
 
-Measured memory, batch 1 including backward, linear in pixel count:
+Checkpoints go to `checkpoints/<timestamp>_<model>_<size>/`. Metrics go to
+Weights & Biases under project `cloud-diffusion-v2`, group `4ch-counts`.
 
-| | per pixel | at 256² | max frame, 22 GB, batch 2 |
-|---|---|---|---|
-| ConvLSTM | 38.2 MB | 2.51 GB | 536 × 536 |
-| SimVP | 14.4 MB | 0.94 GB | 873 × 873 |
+---
 
-ConvLSTM is 2.7× heavier — it keeps every hidden state across 6 timesteps and 3
-layers for BPTT. It is the binding constraint; size for it and run SimVP the
-same, or the comparison is not clean. On 6 GB (4050 laptop) batch 2 is the
-ceiling at 256². On 24 GB, batch 8; gradient accumulation reaches the paper's 32.
+## Where things stand
 
-Wall clock at 712,950 samples: 73 h on the 4050 (measured 371 ms/sample),
-~20 h on one 24 GB card, ~10 h on two (both estimates).
+- Data preprocessed, transferred to the HPC container, verified end to end.
+- Both experiments launched, one per Quadro RTX 6000.
+- `evaluate_test: false` — the test week stays untouched until a winner is
+  picked. Using it to make a decision is what stops it being an honest estimate.
 
-Four cells × 3 seeds = 12 runs. Cut seeds before cutting cells — with one seed
-you cannot separate a real effect from initialization luck, and a fresh ConvLSTM
-started entirely negative on 5 of 8 seeds tested.
+### Notes for the HPC container
 
-## 10. Benchmark: FY-2G / Multi-GRU-RCN (Atmosphere 2020, 11, 1151)
-
-| | theirs | ours |
-|---|---|---|
-| frame | 512 × 512 | 1616 × 1737 |
-| resolution | 13.3 km N-S, 10–24 km E-W (~15.8 km effective) | 4.0 km |
-| area | 65.2 M km² | 41.2 M km² |
-| cadence / lead time | 1 h / 1 h | 30 min / 30 min |
-| days | 200 train, 20 val, 20 test (2018, all seasons) | 46 / 7 / 7 (July only) |
-| sequences | non-overlapping, n=6 (5 in → 1 out) | non-overlapping, 6 in → 1 out |
-| patches | 16 per frame, 128 in → 64 center out | 49 per frame, 256 in → 256 out |
-| cases | 12,800 train | 14,259 train |
-| batch / LR | 32 / 1e-3 | 2–8 / 1e-4 |
-| hardware | one Tesla T4, 12.3 h for ConvLSTM | — |
-
-Their stated "13 km in both directions" is inconsistent with their own stated
-extent: 61° of latitude over 512 px is 13.3 km, but 110° of longitude over 512 px
-is 24 km at the equator and 10 km at 65°N. It is a plate carrée grid.
-
-They **do** crop into patches — this is not a whole-frame method.
-
-## 11. Open items
-
-- [x] `src/manifest.py`: stride parameter, built at stride 7 (399 windows).
-- [x] `Clouds` tiles the frame itself from `crop_stride`; all three splits
-      use the same 49 tiles. `random_crop` and CSI removed.
-- [ ] **New wandb project** — old runs used 180–300 K normalization, a sigmoid
-      output head, clamped metrics and a fractional split. Nothing before
-      2026-09-03 is comparable.
-- [ ] Decide the frame-path bias init (§6).
-- [ ] Restore `epochs` to ~50 and pick `batch_size` for the target GPU.
-- [ ] Rotate the MOSDAC password — it is in plaintext in
-      `~/code/chase-the-cloudv2/data/get_data.sh` (not in any git repo).
-
-## 12. Correctness fixes applied
-
-| # | Issue | Resolution |
-|---|---|---|
-| 1 | Windows built across missing frames → mislabeled lead time | `_is_continuous()` gap rejection |
-| 2 | Lexicographic frame sort scrambles across months | sort by parsed timestamp |
-| 3 | No baseline | persistence in `validate()` |
-| 4 | Loader substituted a random sample on failure, leaking splits | raises |
-| 5 | Contiguous index split shared frames across the boundary | date splits, whole-window containment, buffer days |
-| 6 | 180–300 K normalization clipped 8.46% of targets to 1.0 | 180–340 K, the LUT span |
-| 7 | Clamp in `ResidualWrapper` killed gradients outside range | removed |
-| 8 | Sigmoid on the frame path only → different objective per cell | removed |
-| 9 | Metrics clamped before scoring | unclipped |
-| 10 | Fractional split moved silently when data was added | date-based splits |
-| 11 | No test set | third split, gated behind `evaluate_test` |
-| 12 | Random crops sampled interior 65,536× more than corners | tiled crops |
-
-## 13. Environment
-
-`torchgpu` conda env — Python 3.11, PyTorch 2.6.0+cu124, CUDA 12.4, plus
-`h5py`, `numpy`, `matplotlib`, `scipy`, `scikit-image`, `wandb`, `opencv`,
-`pyyaml`. `nomkl` avoids an MKL/OMP symbol clash during visualization.
-
-The `chase-the-cloud` env is **incomplete** (no `yaml`). Use `torchgpu`.
-
-See `README.md` for setup and run commands.
+- `/dev/shm` is only 70 MB there, so `num_workers: 0`. With workers on, the
+  data loader crashes with a confusing "bus error".
+- Driver 470 caps us at CUDA 11.4, so PyTorch stays pinned to the CUDA 11.8
+  build. Don't upgrade it.
+- The file listing which frames form a sequence stores absolute paths, so it
+  must be rebuilt on the machine that uses it: `python -m src.manifest`.
