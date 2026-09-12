@@ -97,13 +97,18 @@ def main():
 
     # One tiling for every split, so each pixel is trained on and scored equally.
     common = dict(manifest_path=config['data']['manifest_path'], T=T, crop_size=crop_size,
-                  crop_stride=config['data']['crop_stride'])
+                  crop_stride=config['data']['crop_stride'],
+                  lut_path=config['data']['lut_path'],
+                  norm_ranges_path=config['data']['norm_ranges_path'],
+                  target_channels=config['data'].get('target_channels', 1))
 
     train_dataset = Clouds(**common, window_range=idx['train'])
     val_dataset = Clouds(**common, window_range=idx['val'])
     grid = train_dataset.crops
 
     print(f"Frames are {train_dataset.C}x{train_dataset.H}x{train_dataset.W}, crop {crop_size}")
+    print(f"Channels in {train_dataset.channels}, predicting the first "
+          f"{train_dataset.target_channels}")
     print(f"Train: {len(train_dataset)} samples ({len(idx['train'])} windows x {len(grid)} crops)")
     print(f"Val:   {len(val_dataset)} samples ({len(idx['val'])} windows x {len(grid)} crops)")
 
@@ -148,7 +153,7 @@ def main():
 
     # Neither mode bounds its output, so the two stay comparable.
     if config['model'].get('residual'):
-        model = ResidualWrapper(model, out_channels=1).to(device)
+        model = ResidualWrapper(model, out_channels=train_dataset.target_channels).to(device)
         arch_tag += "_res"
         print("Residual mode: model predicts the change from the last input frame")
 

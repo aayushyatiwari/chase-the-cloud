@@ -1,8 +1,15 @@
 # Data Settings
 data:
-  manifest_path: "data/manifest_full.json"
+  manifest_path: "data/manifest_counts.json"
+  # Frames on disk are uint16 sensor counts. These two turn a count into a
+  # normalised brightness temperature at load time; see src/dataset.py.
+  lut_path: "data/luts.npz"
+  norm_ranges_path: "data/norm_ranges.json"
   T: 6
   crop_size: 256
+  # How many leading channels the model predicts. Inputs are all 4 channels;
+  # the target is TIR1 only, which is what ConvLSTM's 1-channel head expects.
+  target_channels: 1
 
   # Inclusive date ranges. 16 and 24 July 2024 belong to no split: they are
   # buffer days keeping train, val and test more than a day apart.
