@@ -1,3 +1,5 @@
+import math
+
 import torch
 import torch.nn.functional as F
 import numpy as np
@@ -56,39 +58,38 @@ def create_window(window_size, channel):
     window = _2D_window.expand(channel, 1, window_size, window_size).contiguous()
     return window
 
-def csi_counts(preds, targets, threshold=0.5):
+def squared_error_counts(pred, target):
     """
-    Contingency counts (hits, misses, false_alarms) for the cold-cloud class.
+    Sum of squared errors, and the number of elements behind it.
 
-    preprocess.py normalizes so that cold cloud tops -> 0 and the warm surface
-    -> 1, so a cloud pixel is one BELOW the threshold. The default 0.5
-    corresponds to 240K, a standard cold cloud-top cutoff.
-
-    Returns raw counts so they can be pooled across a whole epoch before
-    forming the ratio: CSI is a ratio of sums, not a mean of per-batch ratios.
+    Returned raw because PSNR has to be formed once
+    from a whole epoch's pooled MSE, not averaged over batches. See psnr_from_mse.
     """
-    preds_bin = (preds < threshold).float()
-    targets_bin = (targets < threshold).float()
-
-    hits = (preds_bin * targets_bin).sum().item()
-    misses = ((1 - preds_bin) * targets_bin).sum().item()
-    false_alarms = (preds_bin * (1 - targets_bin)).sum().item()
-    return hits, misses, false_alarms
+    return torch.sum((pred - target) ** 2).item(), pred.numel()
 
 
-def csi_from_counts(hits, misses, false_alarms):
+def psnr_from_mse(mse, data_range=1.0):
     """
-    Critical Success Index (CSI) / Threat Score.
-    CSI = Hits / (Hits + Misses + FalseAlarms). Higher is better.
-    True negatives are excluded, so clear sky cannot inflate the score.
-    Undefined (NaN) when no cloud is present in either prediction or target.
+    Peak Signal-to-Noise Ratio in decibels, from an already-pooled MSE.
+
+    This is MSE on a log scale: psnr = 10 * log10(range^2 / mse). It carries no
+    information MSE does not already have, but video prediction papers report
+    it, so it makes results comparable with them.
+
+    Take the log ONCE, at the end, over the pooled MSE. Averaging per-batch PSNR
+    averages logarithms, which is the log of the *geometric* mean of the batch
+    MSEs -- a different number, always lower than the true PSNR, and inconsistent
+    with the MSE reported next to it. A single near-perfect batch also sends its
+    PSNR to infinity and poisons the whole epoch average.
     """
-    denominator = hits + misses + false_alarms
-    return hits / denominator if denominator > 0 else float('nan')
+    if mse <= 0:
+        return float('inf')
+    return 10.0 * math.log10((data_range ** 2) / mse)
 
 
-def calculate_csi(preds, targets, threshold=0.5):
-    """CSI for a single batch. Prefer pooling csi_counts over a full epoch."""
-    return torch.tensor(
-        csi_from_counts(*csi_counts(preds, targets, threshold))
-    ).to(preds.device)
+def psnr(pred, target, data_range=1.0):
+    """
+    PSNR for a single batch. Prefer pooling squared_error_counts over an epoch.
+    """
+    se, n = squared_error_counts(pred, target)
+    return torch.tensor(psnr_from_mse(se / n, data_range), device=pred.device)

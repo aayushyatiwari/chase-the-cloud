@@ -38,6 +38,11 @@ def check(sample):
     plt.show()
     return BT
 
+def check_dtype_raw(h5_path):
+    h5 = h5py.File(h5_path, 'r')
+    
+
+
 if __name__ == "__main__":
     sample = input("give sample name (without .nc): ")
     check(sample)

@@ -23,14 +23,17 @@ class Trainer:
     def train_one_epoch(self, dataloader, epoch):
         """Runs one full pass through the training data."""
         self.model.train()
+        # Weighted by batch size, like validate: the last batch is usually
+        # short and should not count as much as a full one.
         running_loss = 0.0
+        n_seen = 0
         
         for i, (inputs, targets) in enumerate(dataloader):
-            # 1. Prepare data: (Batch, Time, H, W) -> (Batch, Time, 1, H, W)
-            # We add a 'Channel' dimension of 1 because Conv2d expects [B, C, H, W]
-            inputs = inputs.unsqueeze(2).to(self.device)
-            targets = targets.unsqueeze(1).to(self.device)
-            
+            # The dataset already provides the channel axis:
+            # inputs (B, T, C, H, W), targets (B, C, H, W).
+            inputs = inputs.to(self.device)
+            targets = targets.to(self.device)
+
             # 2. Forward pass
             self.optimizer.zero_grad()
             outputs = self.model(inputs)
@@ -40,15 +43,16 @@ class Trainer:
             loss.backward()
             self.optimizer.step()
             
-            running_loss += loss.item()
+            running_loss += loss.item() * targets.shape[0]
+            n_seen += targets.shape[0]
             
             # Log progress every 10 batches
             if i % 10 == 0:
                 print(f"Epoch [{epoch}], Step [{i}/{len(dataloader)}], Loss: {loss.item():.4f}")
                 
-        return running_loss / len(dataloader)
+        return running_loss / n_seen
 
-    def validate(self, dataloader, threshold=0.5):
+    def validate(self, dataloader):
         """
         Runs a pass through the validation data without updating weights.
 
@@ -56,37 +60,54 @@ class Trainer:
         same batches. A model that does not clearly beat persistence has learned
         no cloud motion, so these numbers belong next to every model metric.
         """
-        from src.utils import ssim, csi_counts, csi_from_counts
+        from src.utils import ssim, squared_error_counts, psnr_from_mse
         self.model.eval()
-        # 'model' and 'persistence' each track [loss, ssim] sums and pooled CSI counts
-        sums = {'model': [0.0, 0.0], 'persistence': [0.0, 0.0]}
-        counts = {'model': [0.0, 0.0, 0.0], 'persistence': [0.0, 0.0, 0.0]}
+
+        # Loss and SSIM are means over a batch, so they are accumulated weighted
+        # by batch size -- the last batch is usually short and must not count as
+        # much as a full one.
+        #
+        # PSNR is not a mean at all. It is pooled as squared error and elements,
+        # then turned into decibels once at the end, for the reason spelled out
+        # in psnr_from_mse: averaging per-batch PSNR averages logarithms.
+        weighted = {'model': [0.0, 0.0], 'persistence': [0.0, 0.0]}   # [loss, ssim]
+        sq_err = {'model': 0.0, 'persistence': 0.0}
+        n_elem = {'model': 0, 'persistence': 0}
+        n_seen = 0
 
         with torch.no_grad():
             for inputs, targets in dataloader:
-                inputs = inputs.unsqueeze(2).to(self.device)
-                targets = targets.unsqueeze(1).to(self.device)
+                inputs = inputs.to(self.device)
+                targets = targets.to(self.device)
+                batch = targets.shape[0]
+                n_seen += batch
 
+                # Persistence repeats the last input frame, but only the
+                # channels being predicted -- with extra input channels (e.g.
+                # water vapour) the inputs are wider than the target, and the
+                # predicted channel (TIR1) comes first.
                 preds = {
                     'model': self.model(inputs),
-                    'persistence': inputs[:, -1],
+                    'persistence': inputs[:, -1, :targets.shape[1]],
                 }
 
+                # Unclipped: every metric scores what the model actually
+                # produced. The range is handled by normalising the inputs.
                 for name, pred in preds.items():
-                    sums[name][0] += self.criterion(pred, targets).item()
-                    sums[name][1] += ssim(pred, targets).item()
-                    for i, c in enumerate(csi_counts(pred, targets, threshold=threshold)):
-                        counts[name][i] += c
+                    weighted[name][0] += self.criterion(pred, targets).item() * batch
+                    weighted[name][1] += ssim(pred, targets).item() * batch
+                    se, n = squared_error_counts(pred, targets)
+                    sq_err[name] += se
+                    n_elem[name] += n
 
-        n = len(dataloader)
-        return {
-            'loss': sums['model'][0] / n,
-            'ssim': sums['model'][1] / n,
-            'csi': csi_from_counts(*counts['model']),
-            'persistence_loss': sums['persistence'][0] / n,
-            'persistence_ssim': sums['persistence'][1] / n,
-            'persistence_csi': csi_from_counts(*counts['persistence']),
-        }
+        metrics = {}
+        for name in ('model', 'persistence'):
+            prefix = '' if name == 'model' else 'persistence_'
+            metrics[prefix + 'loss'] = weighted[name][0] / n_seen
+            metrics[prefix + 'ssim'] = weighted[name][1] / n_seen
+            metrics[prefix + 'psnr'] = psnr_from_mse(sq_err[name] / n_elem[name])
+        return metrics
+
 
     def load_checkpoint(self, path, lr=None):
         """
@@ -122,13 +143,14 @@ class Trainer:
             'loss': loss,
         }, path)
         print(f"--- Saved checkpoint: {path} ---")
+        return path
 
 
 class EarlyStopping:
     """
     A simple early stopping mechanism to prevent overfitting.
     """
-    def __init__(self, patience=5, min_delta=1e-4):
+    def __init__(self, patience=10, min_delta=1e-5):
         self.patience = patience
         self.min_delta = min_delta
         self.counter = 0

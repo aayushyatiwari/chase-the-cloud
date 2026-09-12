@@ -1,23 +1,53 @@
 # Data Settings
 data:
-  manifest_path: "data/manifest.json"
+  manifest_path: "data/manifest_counts.json"
+  # Frames on disk are uint16 sensor counts. These two turn a count into a
+  # normalised brightness temperature at load time; see src/dataset.py.
+  lut_path: "data/luts.npz"
+  norm_ranges_path: "data/norm_ranges.json"
   T: 6
-  train_split: 0.8
+  crop_size: 256
+  # How many leading channels the model predicts. Inputs are all 4 channels;
+  # the target is TIR1 only, which is what ConvLSTM's 1-channel head expects.
+  target_channels: 1
+
+  # Inclusive date ranges. 16 and 24 July 2024 belong to no split: they are
+  # buffer days keeping train, val and test more than a day apart.
+  splits:
+    train: ["2023-07-01", "2024-07-15"]   #  291 windows, 73%
+    val:   ["2024-07-17", "2024-07-23"]   #   46 windows, 12%
+    test:  ["2024-07-25", "2024-07-31"]   #   47 windows, 12%
+
+  # Val is a training signal (early stopping, LR schedule, checkpoint choice),
+  # so it is not an unbiased estimate. Turn this on once, at the end.
+  evaluate_test: false
+  # Tile spacing for every split. 256 = non-overlapping, 49 tiles on a
+  # 1616x1737 sector (6x6 plus a flush row and column against the far edges).
+  crop_stride: 256
 
 # Training Hyperparameters
 train:
-  batch_size: 2
+  seed: 42
+  batch_size: 8
+  epochs: 50
+  num_workers: 0
   lr: 0.0001
-  epochs: 30
-  num_workers: 2
+  lr_schedule: true
+  lr_factor: 0.5
+  lr_patience: 3
+  lr_min: 1.0e-6
   checkpoint_dir: "checkpoints"
-  save_every: 5
+  # Stop after this many epochs with no validation improvement.
+  early_stopping_patience: 10
+  early_stopping_min_delta: 0.00001
   # null to train from scratch; a .pt path or 'latest' to continue training
   resume_from: null # latest for last checkpoint
 
 # Model Architecture
 model:
-  type: simvp # convlstm or simvp
+  type: convlstm # convlstm or simvp
+  # true = predict the change from the last frame instead of the whole frame
+  residual: false
 
   # ConvLSTM
   hidden_dim: 64
@@ -33,5 +63,13 @@ model:
 
 # Logging
 logging:
-  project: "cloud-diffusion"
+  project: "cloud-diffusion-v2"
   use_wandb: true
+  # null = auto name, <timestamp>_<model>_<arch>. --name overrides both.
+  run_name: null
+  # Runs sharing a group are plotted together; tags filter them. Keep the group
+  # the same across the two GPUs so the architectures compare side by side --
+  # change `project` instead if you want them fully separate.
+  group: "4ch-counts"
+  tags: ["convlstm", "4ch", "tir1-target"]
+  notes: "ConvLSTM L3 h64 - 4 input channels, TIR1 target, uint16 counts + LUT at load"
