@@ -1,3 +1,5 @@
+import argparse
+import os
 import random
 import shutil
 import numpy as np
@@ -68,14 +70,104 @@ def set_seed(seed):
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
 
-def main():
+def check_output_shape(model, loader, device):
+    """
+    Fail loudly when the model's output does not match the target.
+
+    MSELoss broadcasts rather than raising, so a (B, 4, H, W) prediction scored
+    against a (B, 1, H, W) target trains happily against nonsense. That is a
+    real possibility here: the input is wider than the target by design, and
+    only the model's head decides how wide the output is.
+    """
+    inputs, targets = next(iter(loader))
+    model.eval()
+    with torch.no_grad():
+        out = model(inputs.to(device))
+    model.train()
+    if tuple(out.shape) != tuple(targets.shape):
+        raise ValueError(
+            f"Model outputs {tuple(out.shape)} but the target is {tuple(targets.shape)}. "
+            f"MSELoss would broadcast these instead of erroring. Check "
+            f"data.target_channels against the model's output width."
+        )
+    return inputs, targets, out
+
+
+def run_dry(model, criterion, optimizer, train_loader, val_loader, device, steps):
+    """
+    A few real steps on real batches, then exit.
+
+    Checks the things that only fail once training is actually under way --
+    shapes, dtypes, GPU memory, and how long an epoch will really take -- and
+    writes no checkpoints and logs nothing, so it costs a minute instead of an
+    afternoon.
+    """
+    print(f"\n=== DRY RUN: {steps} train steps, {steps} val steps ===")
+    n_params = sum(p.numel() for p in model.parameters())
+    print(f"Parameters: {n_params:,}")
+
+    inputs, targets, out = check_output_shape(model, train_loader, device)
+    print(f"inputs  {tuple(inputs.shape)} {inputs.dtype} "
+          f"[{inputs.min():.4f}, {inputs.max():.4f}]")
+    print(f"targets {tuple(targets.shape)} {targets.dtype} "
+          f"[{targets.min():.4f}, {targets.max():.4f}]")
+    print(f"outputs {tuple(out.shape)}  <- matches target")
+
+    if device.type == 'cuda':
+        torch.cuda.reset_peak_memory_stats(device)
+
+    model.train()
+    t0 = time.time()
+    done = 0
+    for i, (inputs, targets) in enumerate(train_loader):
+        if i >= steps:
+            break
+        inputs, targets = inputs.to(device), targets.to(device)
+        optimizer.zero_grad()
+        loss = criterion(model(inputs), targets)
+        loss.backward()
+        optimizer.step()
+        done += 1
+        print(f"  train step {i + 1}/{steps}  loss {loss.item():.4f}")
+    if device.type == 'cuda':
+        torch.cuda.synchronize()
+    train_s = (time.time() - t0) / max(done, 1)
+
+    model.eval()
+    t0 = time.time()
+    done_val = 0
+    with torch.no_grad():
+        for i, (inputs, targets) in enumerate(val_loader):
+            if i >= steps:
+                break
+            loss = criterion(model(inputs.to(device)), targets.to(device))
+            done_val += 1
+            print(f"  val   step {i + 1}/{steps}  loss {loss.item():.4f}")
+    if device.type == 'cuda':
+        torch.cuda.synchronize()
+    val_s = (time.time() - t0) / max(done_val, 1)
+
+    print(f"\nPer step: train {train_s * 1000:.0f} ms, val {val_s * 1000:.0f} ms")
+    print(f"Epoch estimate: train {fmt_duration(train_s * len(train_loader))} "
+          f"({len(train_loader)} steps) + val {fmt_duration(val_s * len(val_loader))} "
+          f"({len(val_loader)} steps) = "
+          f"{fmt_duration(train_s * len(train_loader) + val_s * len(val_loader))}")
+    if device.type == 'cuda':
+        peak = torch.cuda.max_memory_allocated(device) / 1e9
+        total = torch.cuda.get_device_properties(device).total_memory / 1e9
+        print(f"Peak GPU memory: {peak:.2f}GB of {total:.1f}GB "
+              f"({100 * peak / total:.0f}%)")
+    print("=== DRY RUN OK -- nothing saved, nothing logged ===\n")
+
+
+def main(args):
     # 1. Load Configuration
-    config = load_config('config.yaml')
+    config = load_config(args.config)
     set_seed(config['train']['seed'])
     use_shm_safe_sharing()
 
     # 2. Initialize wandb
-    if config['logging']['use_wandb']:
+    if config['logging']['use_wandb'] and not args.dry_run:
         wandb.init(
             project=config['logging']['project'],
             config=config # log hyperparameters
@@ -83,7 +175,13 @@ def main():
     
     # 3. Hardware Setup
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f"Using device: {device}")
+    # Pin a process to one GPU with CUDA_VISIBLE_DEVICES, so two experiments can
+    # share the node without either seeing the other's card.
+    if device.type == 'cuda':
+        print(f"Using device: {device} ({torch.cuda.get_device_name(0)}, "
+              f"CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES', 'unset')})")
+    else:
+        print("Using device: cpu")
 
     # 3. Data Preparation
     # Split by time only -- train and val share geography on purpose, since the
@@ -146,6 +244,7 @@ def main():
             N_T=config['model']['N_T'],
             T_out=1,
             groups=config['model']['groups'],
+            out_channels=train_dataset.target_channels,
         ).to(device)
         arch_tag = f"hidS{config['model']['hid_S']}_NT{config['model']['N_T']}"
     else:
@@ -178,6 +277,14 @@ def main():
             min_lr=float(config['train'].get('lr_min', 1e-6)),
         )
         print(f"LR schedule: halve after {scheduler.patience} epochs without improvement")
+
+    if args.dry_run:
+        run_dry(model, criterion, optimizer, train_loader, val_loader,
+                device, args.dry_run)
+        return
+
+    # Cheap once-per-run guard against a silently broadcast loss.
+    check_output_shape(model, train_loader, device)
 
     early = EarlyStopping(
         patience=config['train'].get('early_stopping_patience', 10),
@@ -310,5 +417,16 @@ def main():
             if config['logging']['use_wandb']:
                 wandb.log({f"test_{k}": v for k, v in test_metrics.items()})
 
+def parse_args():
+    parser = argparse.ArgumentParser(description="Train a cloud-motion forecaster.")
+    parser.add_argument("--config", default="config.yaml",
+                        help="Config to use. Give each concurrent experiment its own.")
+    parser.add_argument("--dry-run", type=int, nargs="?", const=5, default=0,
+                        metavar="N",
+                        help="Run N train and N val steps (default 5), report shapes, "
+                             "memory and epoch estimate, then exit without saving or logging.")
+    return parser.parse_args()
+
+
 if __name__ == "__main__":
-    main()
+    main(parse_args())

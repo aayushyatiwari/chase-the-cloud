@@ -185,13 +185,20 @@ class SimVP(nn.Module):
     SimVP model, adapted to predict T_out frames (default 1) from T_in frames
     instead of the paper's T_in == T_out video-prediction setup.
     """
-    def __init__(self, shape_in, hid_S=16, hid_T=256, N_S=4, N_T=8, T_out=1, incep_ker=[3,5,7,11], groups=8):
+    def __init__(self, shape_in, hid_S=16, hid_T=256, N_S=4, N_T=8, T_out=1,
+                 incep_ker=[3,5,7,11], groups=8, out_channels=None):
         super(SimVP, self).__init__()
         T, C, H, W = shape_in
         self.T_out = T_out
+        # The decoder emits out_channels, not C. The input can be wider than the
+        # target -- water vapour helps predict TIR1 without being predicted --
+        # and ConvLSTM's head already works that way. Narrowing it here rather
+        # than slicing the output means the decoder never computes the channels
+        # nothing scores.
+        self.out_channels = C if out_channels is None else out_channels
         self.enc = Encoder(C, hid_S, N_S)
         self.hid = Mid_Xnet(T*hid_S, hid_T, N_T, T_out, hid_S, incep_ker, groups)
-        self.dec = Decoder(hid_S, C, N_S)
+        self.dec = Decoder(hid_S, self.out_channels, N_S)
 
 
     def forward(self, x_raw):
@@ -212,6 +219,6 @@ class SimVP(nn.Module):
         skip = skip.view(B, T, Cs, Hs, Ws)[:, -self.T_out:].reshape(B*self.T_out, Cs, Hs, Ws)
 
         Y = self.dec(hid, skip)
-        Y = Y.reshape(B, self.T_out, C, H, W)
+        Y = Y.reshape(B, self.T_out, self.out_channels, H, W)
         Y = Y.squeeze(1)  # T_out=1: (B, 1, C, H, W) -> (B, C, H, W), matching ConvLSTM
         return Y

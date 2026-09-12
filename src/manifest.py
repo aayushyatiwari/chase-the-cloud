@@ -150,4 +150,22 @@ def split_indices(manifest_path, splits, verbose=True):
 
 
 if __name__ == '__main__':
-    build('data/processed/')
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Build a manifest of T input frames -> 1 target frame windows.")
+    parser.add_argument("--data-dir", default="data/processed_counts")
+    parser.add_argument("--output-path", default="data/manifest_counts.json")
+    parser.add_argument("--T", type=int, default=6)
+    parser.add_argument("--stride", type=int, default=7,
+                        help="T+1 gives non-overlapping sequences; 1 slides one frame.")
+    parser.add_argument("--step-minutes", type=int, default=30)
+    parser.add_argument("--tolerance-minutes", type=int, default=5)
+    args = parser.parse_args()
+
+    if not Path(args.data_dir).is_dir():
+        raise SystemExit(f"No such directory: {args.data_dir}")
+
+    build(args.data_dir, T=args.T, step_minutes=args.step_minutes,
+          tolerance_minutes=args.tolerance_minutes,
+          output_path=args.output_path, stride=args.stride)
