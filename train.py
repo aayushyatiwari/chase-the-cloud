@@ -166,13 +166,6 @@ def main(args):
     set_seed(config['train']['seed'])
     use_shm_safe_sharing()
 
-    # 2. Initialize wandb
-    if config['logging']['use_wandb'] and not args.dry_run:
-        wandb.init(
-            project=config['logging']['project'],
-            config=config # log hyperparameters
-        )
-    
     # 3. Hardware Setup
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     # Pin a process to one GPU with CUDA_VISIBLE_DEVICES, so two experiments can
@@ -297,7 +290,25 @@ def main(args):
     # 5. Initialize the Trainer (The Engine)
     # e.g. 20260828_161422_convlstm_L3_h64 -- timestamp plus architecture, so a
     # stale checkpoint can never be mistaken for one matching the current config.
-    run_name = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{model_type}_{arch_tag}"
+    run_name = (args.name
+                or config['logging'].get('run_name')
+                or f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{model_type}_{arch_tag}")
+    print(f"Run name: {run_name}")
+
+    # 2. Initialize wandb, now that the run has a name.
+    # Named explicitly so two concurrent experiments are told apart at a glance
+    # instead of getting wandb's random adjective-noun pairs. `group` ties
+    # related runs together; `tags` filter them.
+    if config['logging']['use_wandb'] and not args.dry_run:
+        log_cfg = config['logging']
+        wandb.init(
+            project=log_cfg['project'],
+            name=run_name,
+            group=log_cfg.get('group') or None,
+            tags=log_cfg.get('tags') or None,
+            notes=log_cfg.get('notes') or None,
+            config=config,  # log hyperparameters
+        )
 
     trainer = Trainer(
         model,
@@ -421,6 +432,9 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Train a cloud-motion forecaster.")
     parser.add_argument("--config", default="config.yaml",
                         help="Config to use. Give each concurrent experiment its own.")
+    parser.add_argument("--name", default=None,
+                        help="Name for this run (wandb run and checkpoint directory). "
+                             "Defaults to <timestamp>_<model>_<arch>.")
     parser.add_argument("--dry-run", type=int, nargs="?", const=5, default=0,
                         metavar="N",
                         help="Run N train and N val steps (default 5), report shapes, "

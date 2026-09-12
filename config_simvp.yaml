@@ -65,3 +65,11 @@ model:
 logging:
   project: "cloud-diffusion-v2"
   use_wandb: true
+  # null = auto name, <timestamp>_<model>_<arch>. --name overrides both.
+  run_name: null
+  # Runs sharing a group are plotted together; tags filter them. Keep the group
+  # the same across the two GPUs so the architectures compare side by side --
+  # change `project` instead if you want them fully separate.
+  group: "4ch-counts"
+  tags: ["simvp", "4ch", "tir1-target"]
+  notes: "SimVP hidS64 NT4 - 4 input channels, TIR1 target, uint16 counts + LUT at load"
