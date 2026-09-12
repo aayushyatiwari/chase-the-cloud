@@ -1,10 +1,8 @@
 import argparse
 import os
 import random
-import shutil
 import numpy as np
 import torch
-import torch.multiprocessing
 import torch.nn as nn
 import yaml
 import wandb
@@ -19,29 +17,6 @@ from src.models.residual import ResidualWrapper
 from src.engine import Trainer, EarlyStopping
 from src.utils import latest_checkpoint
 import time
-
-def use_shm_safe_sharing(min_gb=1.0):
-    """
-    Fall back to file-based tensor sharing when /dev/shm is small.
-
-    DataLoader workers hand tensors to the main process through shared memory.
-    Containers routinely ship a 64MB /dev/shm, which overflows and kills the
-    workers with a bus error -- and it surfaces as a RuntimeError inside the
-    model's forward pass, which points at entirely the wrong code. The
-    file_system strategy passes tensors through temp files instead, so this
-    needs no change to how the container was started.
-
-    Only applied when /dev/shm is actually small: the default strategy is
-    faster, and on a normal machine there is nothing to work around.
-    """
-    try:
-        free_gb = shutil.disk_usage('/dev/shm').total / 1e9
-    except OSError:
-        return
-    if free_gb < min_gb:
-        torch.multiprocessing.set_sharing_strategy('file_system')
-        print(f"/dev/shm is only {free_gb:.2f}GB -- "
-              "using file_system tensor sharing so DataLoader workers survive")
 
 
 def fmt_duration(seconds):
@@ -160,13 +135,57 @@ def run_dry(model, criterion, optimizer, train_loader, val_loader, device, steps
     print("=== DRY RUN OK -- nothing saved, nothing logged ===\n")
 
 
+def build_model(config, dataset, device):
+    """
+    The model named by config.model.type, sized from the data.
+
+    Both architectures take all of the dataset's channels as input and emit only
+    dataset.target_channels -- the input is wider than the target by design, and
+    the predicted channels come first. Returns (model, arch_tag), where arch_tag
+    goes into the run name so a checkpoint can never be mistaken for one from a
+    different architecture.
+    """
+    m = config['model']
+    model_type = m['type']
+    if model_type == 'convlstm':
+        model = ConvLSTM(
+            input_dim=dataset.C,
+            hidden_dim=m['hidden_dim'],
+            kernel_size=m['kernel_size'],
+            num_layers=m['num_layers'],
+        )
+        arch_tag = f"L{m['num_layers']}_h{m['hidden_dim']}"
+    elif model_type == 'simvp':
+        model = SimVP(
+            shape_in=(config['data']['T'], dataset.C,
+                      config['data']['crop_size'], config['data']['crop_size']),
+            hid_S=m['hid_S'],
+            hid_T=m['hid_T'],
+            N_S=m['N_S'],
+            N_T=m['N_T'],
+            T_out=1,
+            groups=m['groups'],
+            out_channels=dataset.target_channels,
+        )
+        arch_tag = f"hidS{m['hid_S']}_NT{m['N_T']}"
+    else:
+        raise ValueError(f"Unknown model.type: {model_type!r} (expected 'convlstm' or 'simvp')")
+
+    # Neither mode bounds its output, so the two stay comparable.
+    if m.get('residual'):
+        model = ResidualWrapper(model, out_channels=dataset.target_channels)
+        arch_tag += "_res"
+        print("Residual mode: model predicts the change from the last input frame")
+
+    return model.to(device), arch_tag
+
+
 def main(args):
     # 1. Load Configuration
     config = load_config(args.config)
     set_seed(config['train']['seed'])
-    use_shm_safe_sharing()
 
-    # 3. Hardware Setup
+    # 2. Hardware Setup
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     # Pin a process to one GPU with CUDA_VISIBLE_DEVICES, so two experiments can
     # share the node without either seeing the other's card.
@@ -203,52 +222,17 @@ def main(args):
     print(f"Train: {len(train_dataset)} samples ({len(idx['train'])} windows x {len(grid)} crops)")
     print(f"Val:   {len(val_dataset)} samples ({len(idx['val'])} windows x {len(grid)} crops)")
 
-    train_loader = DataLoader(
-        train_dataset, 
-        batch_size=config['train']['batch_size'], 
-        shuffle=True, 
-        num_workers=config['train']['num_workers']
-    )
-    val_loader = DataLoader(
-        val_dataset, 
-        batch_size=config['train']['batch_size'], 
-        shuffle=False, 
-        num_workers=config['train']['num_workers']
-    )
+    # Workers hand batches over through /dev/shm, which containers often cap at
+    # 64MB. If a worker dies with a bus error, that is why -- drop num_workers
+    # to 0, or restart the container with a larger --shm-size.
+    loader_args = dict(batch_size=config['train']['batch_size'],
+                       num_workers=config['train']['num_workers'])
+    train_loader = DataLoader(train_dataset, shuffle=True, **loader_args)
+    val_loader = DataLoader(val_dataset, shuffle=False, **loader_args)
+
     
     # 4. Initialize Model, Optimizer, and Loss Function
-    # Channel count comes from the data, so adding channels needs no code change.
-    C_in = train_dataset.C
-    model_type = config['model']['type']
-    if model_type == 'convlstm':
-        model = ConvLSTM(
-            input_dim=C_in,
-            hidden_dim=config['model']['hidden_dim'],
-            kernel_size=config['model']['kernel_size'],
-            num_layers=config['model']['num_layers']
-        ).to(device)
-        arch_tag = f"L{config['model']['num_layers']}_h{config['model']['hidden_dim']}"
-    elif model_type == 'simvp':
-        model = SimVP(
-            shape_in=(T, C_in, crop_size, crop_size),
-            hid_S=config['model']['hid_S'],
-            hid_T=config['model']['hid_T'],
-            N_S=config['model']['N_S'],
-            N_T=config['model']['N_T'],
-            T_out=1,
-            groups=config['model']['groups'],
-            out_channels=train_dataset.target_channels,
-        ).to(device)
-        arch_tag = f"hidS{config['model']['hid_S']}_NT{config['model']['N_T']}"
-    else:
-        raise ValueError(f"Unknown model.type: {model_type!r} (expected 'convlstm' or 'simvp')")
-
-    # Neither mode bounds its output, so the two stay comparable.
-    if config['model'].get('residual'):
-        model = ResidualWrapper(model, out_channels=train_dataset.target_channels).to(device)
-        arch_tag += "_res"
-        print("Residual mode: model predicts the change from the last input frame")
-
+    model, arch_tag = build_model(config, train_dataset, device)
 
     # float() guards against YAML parsing e.g. 3e-5 as a string
     lr = float(config['train']['lr'])
@@ -292,7 +276,8 @@ def main(args):
     # stale checkpoint can never be mistaken for one matching the current config.
     run_name = (args.name
                 or config['logging'].get('run_name')
-                or f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{model_type}_{arch_tag}")
+                or f"{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+                   f"_{config['model']['type']}_{arch_tag}")
     print(f"Run name: {run_name}")
 
     # 2. Initialize wandb, now that the run has a name.
@@ -412,12 +397,7 @@ def main(args):
             print("No checkpoint improved on the resumed loss -- skipping the test pass.")
         else:
             test_dataset = Clouds(**common, window_range=idx['test'])
-            test_loader = DataLoader(
-                test_dataset,
-                batch_size=config['train']['batch_size'],
-                shuffle=False,
-                num_workers=config['train']['num_workers'],
-            )
+            test_loader = DataLoader(test_dataset, shuffle=False, **loader_args)
             print(f"\nScoring {best_ckpt} on the test split "
                   f"({len(test_dataset)} samples, {len(idx['test'])} windows x {len(grid)} crops)")
             trainer.load_checkpoint(best_ckpt)
