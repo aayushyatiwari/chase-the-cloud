@@ -47,7 +47,7 @@ train:
 model:
   type: convlstm # convlstm or simvp
   # true = predict the change from the last frame instead of the whole frame
-  residual: false
+  residual: true
 
   # ConvLSTM
   hidden_dim: 64
