@@ -42,9 +42,9 @@ train:
   # The two terms are not on the same scale. Run `python train.py --dry-run`,
   # read the printed split, and set beta so they are comparable.
   loss:
-    pixel: mse     # mse | l1 | none
+    pixel: l1     # mse | l1 | none
     alpha: 1.0
-    beta: 0.0
+    beta: 1.0
     gdl_p: 1      # 1 = sharper and more robust, 2 = like MSE
   lr_schedule: true
   lr_factor: 0.5
