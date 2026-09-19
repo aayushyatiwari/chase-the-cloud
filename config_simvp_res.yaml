@@ -32,6 +32,20 @@ train:
   epochs: 50
   num_workers: 0
   lr: 0.0001
+  # Loss:  L = alpha * pixel + beta * GDL
+  #   pixel: mse | l1 | none  -- the pixel-by-pixel term
+  #   beta:  weight on the Gradient Difference Loss, which scores edges rather
+  #          than pixels (src/utils.gradient_difference). beta: 0 is plain
+  #          pixel training, the old behaviour.
+  # GDL cannot see overall brightness -- add a constant to every pixel and it
+  # does not change -- so alpha: 0 is an ablation, not a candidate.
+  # The two terms are not on the same scale. Run `python train.py --dry-run`,
+  # read the printed split, and set beta so they are comparable.
+  loss:
+    pixel: mse     # mse | l1 | none
+    alpha: 1.0
+    beta: 0.0
+    gdl_p: 1      # 1 = sharper and more robust, 2 = like MSE
   lr_schedule: true
   lr_factor: 0.5
   lr_patience: 3

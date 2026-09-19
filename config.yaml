@@ -32,6 +32,28 @@ train:
   epochs: 50
   num_workers: 0
   lr: 0.0001
+  # Loss:  L = alpha * pixel + beta * GDL
+  #   pixel: mse | l1 | none  -- the pixel-by-pixel term
+  #   beta:  weight on the Gradient Difference Loss, which scores edges rather
+  #          than pixels (src/utils.gradient_difference). beta: 0 is plain
+  #          pixel training, the old behaviour.
+  # GDL cannot see overall brightness -- add a constant to every pixel and it
+  # does not change -- so alpha: 0 is an ablation, not a candidate.
+  #
+  # The weights below are the paper's own (Mathieu et al., ICLR 2016, sec 3.2):
+  # lambda_lp = 1, lambda_gdl = 1, alpha = 1, alongside an l1 pixel term. Its
+  # third weight, lambda_adv = 0.05, has no counterpart here -- there is no
+  # discriminator to weigh against.
+  #
+  # Keep the exponents matched: l1 with gdl_p 1, or mse with gdl_p 2. The paper
+  # normalised its patches to [-1, 1] and ours are [0, 1]; a matched pair scales
+  # the same way with the data range, so 1:1 carries over unchanged. Mixing mse
+  # with gdl_p 1 does not, and needs beta recalibrated from the --dry-run split.
+  loss:
+    pixel: l1     # mse | l1 | none
+    alpha: 1.0
+    beta: 1.0
+    gdl_p: 1      # 1 = sharper and more robust, 2 = like MSE
   lr_schedule: true
   lr_factor: 0.5
   lr_patience: 3

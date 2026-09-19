@@ -15,7 +15,7 @@ from src.models.convlstm import ConvLSTM
 from src.models.simvp import SimVP
 from src.models.residual import ResidualWrapper
 from src.engine import Trainer, EarlyStopping
-from src.utils import latest_checkpoint
+from src.utils import latest_checkpoint, CombinedLoss
 import time
 
 
@@ -72,6 +72,10 @@ def run_dry(model, criterion, optimizer, train_loader, val_loader, device, steps
     """
     A few real steps on real batches, then exit.
 
+    Also prints the pixel/gradient split of each loss, which is how beta gets
+    calibrated: on [0, 1] frames the two terms are not on the same scale, so a
+    beta chosen blind can leave the gradient term contributing nothing.
+
     Checks the things that only fail once training is actually under way --
     shapes, dtypes, GPU memory, and how long an epoch will really take -- and
     writes no checkpoints and logs nothing, so it costs a minute instead of an
@@ -103,7 +107,12 @@ def run_dry(model, criterion, optimizer, train_loader, val_loader, device, steps
         loss.backward()
         optimizer.step()
         done += 1
-        print(f"  train step {i + 1}/{steps}  loss {loss.item():.4f}")
+        # The two terms are on different scales, so the split is what tells you
+        # whether beta is large enough for the gradient term to matter at all.
+        terms = getattr(criterion, 'last_terms', None)
+        split = (f"  (pixel {terms['pixel']:.4f} + gdl {terms['gdl']:.4f})"
+                 if terms else "")
+        print(f"  train step {i + 1}/{steps}  loss {loss.item():.4f}{split}")
     if device.type == 'cuda':
         torch.cuda.synchronize()
     train_s = (time.time() - t0) / max(done, 1)
@@ -180,6 +189,49 @@ def build_model(config, dataset, device):
     return model.to(device), arch_tag
 
 
+def build_criterion(config):
+    """
+    The loss named by config.train.loss, as
+
+        L = alpha * pixel(pred, target) + beta * GDL(pred, target)
+
+    where `pixel` is MSE or L1 and GDL scores the edges (see
+    src.utils.gradient_difference). Setting a weight to zero drops that term:
+    beta = 0 is plain pixel training, alpha = 0 is gradients alone -- which is
+    blind to overall brightness, so it is an ablation rather than a candidate.
+
+    Returns (criterion, loss_tag), where loss_tag goes into the run name. A
+    checkpoint stores only its loss as a bare number, with nothing saying which
+    objective produced it, so the name is the only thing keeping runs under
+    different losses apart.
+    """
+    cfg = config['train'].get('loss') or {}
+    pixel_type = cfg.get('pixel', 'mse')
+    # float() guards against YAML reading e.g. 1.0e-2 as a string
+    alpha = float(cfg.get('alpha', 1.0))
+    beta = float(cfg.get('beta', 0.0))
+    p = int(cfg.get('gdl_p', 1))
+
+    pixel_losses = {'mse': nn.MSELoss, 'l1': nn.L1Loss}
+    if pixel_type not in pixel_losses and pixel_type not in (None, 'none'):
+        raise ValueError(
+            f"Unknown train.loss.pixel: {pixel_type!r} (expected 'mse', 'l1' or 'none')")
+    if pixel_type in (None, 'none'):
+        alpha = 0.0
+        pixel_type = 'mse'  # unused at alpha = 0, but keeps the module constructible
+    if alpha == 0.0 and beta == 0.0:
+        raise ValueError("train.loss has alpha = beta = 0; there is nothing to minimise.")
+
+    criterion = CombinedLoss(pixel_losses[pixel_type](), alpha=alpha, beta=beta, p=p)
+
+    parts = ([pixel_type] if alpha else []) + ([f"gdl{p}"] if beta else [])
+    loss_tag = "+".join(parts)
+    if beta:
+        loss_tag += f"_a{alpha:g}b{beta:g}"
+    print(f"Loss: {loss_tag}  (L = {alpha:g} * {pixel_type} + {beta:g} * GDL p={p})")
+    return criterion, loss_tag
+
+
 def main(args):
     # 1. Load Configuration
     config = load_config(args.config)
@@ -237,7 +289,12 @@ def main(args):
     # float() guards against YAML parsing e.g. 3e-5 as a string
     lr = float(config['train']['lr'])
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-    criterion = nn.MSELoss()
+    criterion, loss_tag = build_criterion(config)
+    # The objective is part of what a checkpoint is, so it goes in the name.
+    # Plain MSE is the old default and keeps the old naming, so earlier runs
+    # stay comparable at a glance.
+    if loss_tag != 'mse':
+        arch_tag += f"_{loss_tag}"
 
     # Cut the learning rate once validation stops improving. A fixed rate leaves
     # both losses flat well before early stopping fires -- the optimiser is
