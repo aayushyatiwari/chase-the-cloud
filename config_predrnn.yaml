@@ -32,7 +32,7 @@ train:
   # resolution, and every ST-LSTM cell keeps two memories per layer per
   # timestep for the backward pass. Start low and raise it if --dry-run shows
   # headroom.
-  batch_size: 4
+  batch_size: 8
   epochs: 50
   num_workers: 0
   lr: 0.0001
