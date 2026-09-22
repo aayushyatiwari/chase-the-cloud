@@ -30,7 +30,7 @@ train:
   seed: 42
   # Lower than SimVP v1's 24: gSTA's attention and its 4x MLP hold more
   # activations than the Inception blocks they replace. Confirm with --dry-run.
-  batch_size: 16
+  batch_size: 20
   epochs: 50
   num_workers: 0
   lr: 0.0001
