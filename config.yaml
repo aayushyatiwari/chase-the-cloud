@@ -1,23 +1,75 @@
 # Data Settings
 data:
-  manifest_path: "data/manifest.json"
+  manifest_path: "data/manifest_counts.json"
+  # Frames on disk are uint16 sensor counts. These two turn a count into a
+  # normalised brightness temperature at load time; see src/dataset.py.
+  lut_path: "data/luts.npz"
+  norm_ranges_path: "data/norm_ranges.json"
   T: 6
-  train_split: 0.8
+  crop_size: 256
+  # How many leading channels the model predicts. Inputs are all 4 channels;
+  # the target is TIR1 only, which is what ConvLSTM's 1-channel head expects.
+  target_channels: 1
+
+  # Inclusive date ranges. 16 and 24 July 2024 belong to no split: they are
+  # buffer days keeping train, val and test more than a day apart.
+  splits:
+    train: ["2023-07-01", "2024-07-15"]   #  291 windows, 73%
+    val:   ["2024-07-17", "2024-07-23"]   #   46 windows, 12%
+    test:  ["2024-07-25", "2024-07-31"]   #   47 windows, 12%
+
+  # Val is a training signal (early stopping, LR schedule, checkpoint choice),
+  # so it is not an unbiased estimate. Turn this on once, at the end.
+  evaluate_test: false
+  # Tile spacing for every split. 256 = non-overlapping, 49 tiles on a
+  # 1616x1737 sector (6x6 plus a flush row and column against the far edges).
+  crop_stride: 256
 
 # Training Hyperparameters
 train:
-  batch_size: 2
+  seed: 42
+  batch_size: 8
+  epochs: 50
+  num_workers: 0
   lr: 0.0001
-  epochs: 30
-  num_workers: 2
+  # Loss:  L = alpha * pixel + beta * GDL
+  #   pixel: mse | l1 | none  -- the pixel-by-pixel term
+  #   beta:  weight on the Gradient Difference Loss, which scores edges rather
+  #          than pixels (src/utils.gradient_difference). beta: 0 is plain
+  #          pixel training, the old behaviour.
+  # GDL cannot see overall brightness -- add a constant to every pixel and it
+  # does not change -- so alpha: 0 is an ablation, not a candidate.
+  #
+  # The weights below are the paper's own (Mathieu et al., ICLR 2016, sec 3.2):
+  # lambda_lp = 1, lambda_gdl = 1, alpha = 1, alongside an l1 pixel term. Its
+  # third weight, lambda_adv = 0.05, has no counterpart here -- there is no
+  # discriminator to weigh against.
+  #
+  # Keep the exponents matched: l1 with gdl_p 1, or mse with gdl_p 2. The paper
+  # normalised its patches to [-1, 1] and ours are [0, 1]; a matched pair scales
+  # the same way with the data range, so 1:1 carries over unchanged. Mixing mse
+  # with gdl_p 1 does not, and needs beta recalibrated from the --dry-run split.
+  loss:
+    pixel: none     # mse | l1 | none
+    alpha: 1.0
+    beta: 1.0
+    gdl_p: 1      # 1 = sharper and more robust, 2 = like MSE
+  lr_schedule: true
+  lr_factor: 0.5
+  lr_patience: 3
+  lr_min: 1.0e-6
   checkpoint_dir: "checkpoints"
-  save_every: 5
+  # Stop after this many epochs with no validation improvement.
+  early_stopping_patience: 10
+  early_stopping_min_delta: 0.00001
   # null to train from scratch; a .pt path or 'latest' to continue training
   resume_from: null # latest for last checkpoint
 
 # Model Architecture
 model:
-  type: simvp # convlstm or simvp
+  type: convlstm # convlstm | simvp | simvp2 | predrnn | phydnet
+  # true = predict the change from the last frame instead of the whole frame
+  residual: true
 
   # ConvLSTM
   hidden_dim: 64
@@ -29,9 +81,37 @@ model:
   hid_T: 256
   N_S: 4
   N_T: 4
-  groups: 8
+  groups: 8   # simvp only; simvp2's translator has no grouped convs
+
+  # SimVPv2 -- reuses hid_S/hid_T/N_S/N_T above, so a v1 and a v2 run with the
+  # same numbers differ only in the translator (Inception vs gSTA attention).
+  mlp_ratio: 4.0
+  drop: 0.0
+  spatio_kernel: 21   # effective receptive field of the gSTA gate, in pixels
+
+  # PredRNN -- reuses hidden_dim/kernel_size/num_layers above. The zigzag memory
+  # is passed between every layer, so hidden_dim must be one number, not a list
+  # of differing widths. The paper uses 4 layers.
+
+  # PhyDNet
+  nf: 32                       # encoder/decoder width
+  latent_dim: 64               # the shared latent both branches recur in
+  phy_hidden_dims: 49          # PhyCell's operator bank; 49 = every operator a
+                               # 7x7 kernel can express, which is the paper's setting
+  phy_layers: 1
+  phy_kernel_size: 7
+  conv_hidden_dims: [128, 128, 64]   # the residual ConvLSTM branch
+  conv_layers: 3
 
 # Logging
 logging:
-  project: "cloud-diffusion"
+  project: "cloud-diffusion-v2"
   use_wandb: true
+  # null = auto name, <timestamp>_<model>_<arch>. --name overrides both.
+  run_name: null
+  # Runs sharing a group are plotted together; tags filter them. Keep the group
+  # the same across the two GPUs so the architectures compare side by side --
+  # change `project` instead if you want them fully separate.
+  group: "4ch-counts"
+  tags: ["convlstm", "4ch", "tir1-target"]
+  notes: "ConvLSTM L3 h64 - 4 input channels, TIR1 target, uint16 counts + LUT at load"

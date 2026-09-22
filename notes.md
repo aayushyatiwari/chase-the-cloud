@@ -1,331 +1,219 @@
-# Technical Notes: Cloud Motion Nowcasting on INSAT-3DR
+# Chase the Cloud
 
-## Data range
-
-- Shape: IMG_TIR1 is (1, 1616, 1737) — 1616 rows × 1737 cols (the leading 1 is dropped in preprocess.py's [0] index).
-- Coverage: it's the "ASIA_MER" sector, a Mercator-projected regional crop the satellite ground station already produces, spanning lat −10° to 45.5°, lon 44.5° to 110° (per the file's own attrs).
-- Ground resolution: 4 km/pixel for TIR1 
-- Full sector physical extent: 6,946 km × 6,461 km.
-
-**Processed crop**
-
-DEFAULT_CROP in preprocess.py: rows 680:936, cols 740:996 → 256×256 pixels.
-
-At 4 km/pixel that's:
-
-- 1,020 km × 1,020 km (confirmed directly from the projection coordinates: Δrows = 1020.1 km, Δcols = 1020.4 km — matches 256 px × 4 km almost exactly, small discrepancy is projection rounding).
-
-- Latitude: 15.57°N to 24.65°N
-- Longitude: 72.42°E to 82.04°E
-- Center: ~20.1°N, 77.2°E
-
-That's central-western India — roughly Mumbai/Maharashtra in the southwest corner up through Madhya Pradesh/Gujarat in the north, a ~1000×1000 km box. 
-
-## 1. Project Scope
-
-Short-term cloud motion forecasting (nowcasting) from geostationary satellite
-imagery: given `T` consecutive thermal-infrared frames, predict the **single
-next frame**. The project began on NASA GOES-16 data (NetCDF) and now runs on
-**INSAT-3DR** L1C imagery from MOSDAC (HDF5).
-
-- **Channel**: Thermal Infrared 1 (TIR1), single band.
-- **Task**: `T` frames in → 1 frame out (not a multi-frame rollout).
-- **Baseline architecture**: ConvLSTM (`src/models/convlstm.py`).
-- **Legacy**: `src/explore.py` is GOES/NetCDF-era code and is not part of the
-  current pipeline.
-
-## 2. Data Source and Brightness Temperature
-
-INSAT-3DR L1C files contain raw sensor counts plus a lookup table, unlike GOES
-which often supplies brightness temperature (BT) directly. Conversion:
-
-1. Read `IMG_TIR1` (raw counts, range ~480–950), taking index 0 of the `(1,H,W)` array.
-2. Read `IMG_TIR1_TEMP` (1024-element LUT).
-3. Map: `BT = LUT[raw_counts]`.
-
-Resulting BT spans roughly 180K (high, cold cloud tops) to 310K (warm surface).
-Full-disk imagery is ~1616×1737.
-
-## 3. Preprocessing (`src/preprocess.py`)
-
-Pipeline per file: HDF5 → BT via LUT → crop → normalize → NaN fill → `.npy`.
-
-- **Crop**: fixed window, rows `680:936`, cols `740:996` → **256×256**.
-- **Normalization**: `(BT - 180) / (300 - 180)`, clipped to `[0, 1]`.
-- **Output**: `float32` `.npy` in `data/processed/`.
-
-### Orientation convention (important)
-
-The normalization is **not** cloud-bright. It maps:
-
-| BT | normalized | physical meaning |
-|---|---|---|
-| ≤ 180K | **0.0** | coldest / highest cloud tops |
-| ≥ 300K | **1.0** | warm surface, clear sky |
-
-**Cold cloud is the LOW end of the range.** Any thresholding of cloud must
-therefore test `value < threshold`, not `>`. This convention is the single
-easiest thing to get backwards in this codebase — it silently inverted the CSI
-metric once already (see §8). Note also that `explore.py` plots with `cmap='gray_r'`
-so cold cloud renders bright, while the notebooks plot normalized data with
-`cmap='gray'` where cloud renders dark.
-
-The [180K, 300K] window is chosen to concentrate resolution on cloud-top
-temperature gradients, which carry the motion signal.
-
-## 4. Dataset Construction (`src/manifest.py`)
-
-Builds a sliding-window manifest over the processed frames. For each window of
-`T+1` frames, the first `T` are inputs and the last is the target.
-
-Two guarantees the builder enforces:
-
-**Sorted by parsed timestamp, not filename.** `_timestamp()` parses the
-`DDMONYYYY_HHMM` field out of the filename. Lexicographic filename sorting is
-only coincidentally correct within a single month — across months it orders
-day-major then month-alphabetically (`01AUG` < `01JUL` < `01JUN`), which would
-scramble the time series entirely. Any multi-month ingest depends on this.
-
-**Temporal continuity.** `_is_continuous()` rejects any window whose
-consecutive frames are not one time step apart (`step_minutes=30`,
-`tolerance_minutes=5`). Without this check, a missing frame produces a window
-that spans more time than it claims — the model is trained to predict 30
-minutes ahead while the actual target is 60 minutes ahead, or an input sequence
-silently skips an hour of cloud motion. The tolerance keeps benign scan-start
-jitter (±3 min) while dropping genuine frame dropouts.
-
-Skips are reported separately (`skipped_gap` vs `skipped_invalid`) so data loss
-is attributable rather than a single opaque number.
-
-### Loader (`src/dataset.py`)
-
-`Clouds.__getitem__` loads the frames and **raises on failure**. It deliberately
-does not substitute a fallback sample: drawing a random replacement index would
-sample the *whole* dataset, bypassing the train/val index ranges and leaking
-training frames into validation, while also hiding corrupt files and making
-validation non-reproducible.
-
-## 5. Train / Validation Split (`train.py`)
-
-The split is **sequential** (no shuffling) because the data is a time series —
-random splitting would place near-identical adjacent frames on both sides.
-
-Sequential splitting alone is not sufficient. Because the manifest uses a
-**stride-1** sliding window, manifest sample `i` spans raw frames `[i, i+T]`, so
-adjacent samples overlap in `T` of their `T+1` frames. A naive contiguous index
-cut therefore puts samples on either side of the boundary that share up to `T`
-raw frames — and the last training sample's *target* frame appears among the
-first validation sample's *inputs*.
-
-The fix is a **buffer of `T` samples dropped at the boundary**, assigned to
-neither split:
-
-```python
-train_dataset = Subset(full_dataset, range(0, train_size))
-val_dataset   = Subset(full_dataset, range(train_size + T, len(full_dataset)))
-```
-
-This guarantees no raw frame is shared between any training and any validation
-sample. Cost is `T` discarded samples.
-
-## 6. Metrics (`src/utils.py`, `src/engine.py`)
-
-**MSE** — the training objective (`nn.MSELoss`), pixelwise on normalized values.
-The only metric that produces gradients; the others are diagnostic and run
-under `torch.no_grad()`.
-
-**SSIM** — windowed structural similarity, standard Wang et al. formulation
-computed via convolution with an 11×11 Gaussian (σ=1.5). Local means/variances/
-covariance come from `conv2d`, using `Var(X) = E[X²] − E[X]²`. Stabilizers
-`C1=0.01²`, `C2=0.03²` assume **data range 1.0**. Higher is better.
-
-**CSI (Critical Success Index)** — meteorological skill score for the
-**cold-cloud class**:
+Short-term cloud forecasting from Indian weather-satellite images. Give the
+model the last 3 hours of sky and it predicts what the sky looks like 30
+minutes from now.
 
 ```
-CSI = hits / (hits + misses + false_alarms)
+ 06:00   06:30   07:00   07:30   08:00   08:30        09:00
+ [img]   [img]   [img]   [img]   [img]   [img]   ->   [predicted]
+ <------------- 6 frames in ----------------->        1 frame out
 ```
 
-True negatives are excluded by design, so the large clear-sky majority cannot
-inflate the score. Three properties of this implementation matter:
+---
 
-- **Cold class**: thresholds `< threshold`, matching §3. Default `0.5`
-  corresponds to **240K**, close to conventional cold cloud-top cutoffs
-  (~235–241K) used to flag deep convection in IR imagery.
-- **Pooled, not averaged**: `csi_counts()` returns raw hit/miss/false-alarm
-  counts which are accumulated across the whole epoch before
-  `csi_from_counts()` forms the ratio. CSI is a ratio of sums; averaging
-  per-batch ratios is a different (and biased) quantity.
-- **Undefined, not zero**: with no cloud in either prediction or target the
-  denominator is 0 and the result is `NaN`. Returning `0.0` would score a
-  correct "no cloud anywhere" forecast as a total miss.
+## The dataset
 
-`calculate_csi()` remains as a single-batch convenience wrapper returning a
-tensor, used by `notebooks/inference_check.ipynb`.
+Images from **INSAT-3D / 3DR**, the Indian weather satellites, over the Asia
+sector (roughly 10°S–45°N, 44°E–110°E).
 
-### Persistence baseline
-
-`Trainer.validate()` scores a **persistence forecast** (repeat the last input
-frame) on the same batches and returns `persistence_loss`, `persistence_ssim`,
-`persistence_csi` next to the model metrics.
-
-This is not optional bookkeeping. Over a 30-minute step, clouds move little, so
-persistence is a strong forecast and a model that does not clearly beat it has
-learned no motion. Absolute metric values are misleading without it — on this
-data a constant all-warm image scores CSI ≈ 0.57 under the pre-fix warm-class
-definition. Every reported number should be quoted as a delta against
-persistence.
-
-## 7. Training Flow
-
-End to end, from raw download to logged metrics:
-
-**Stage 1 — Preprocess** (`python src/preprocess.py --raw-dir data/data --out-dir data/processed`)
-Each `.h5` → LUT-mapped BT → 256×256 crop → normalized to `[0,1]` → NaN-filled
-→ `.npy`. Idempotent; existing outputs are skipped unless `--overwrite`.
-
-**Stage 2 — Build manifest** (`python src/manifest.py`)
-Sort `data/processed/*.npy` by parsed timestamp → validate each frame → slide a
-`T+1` window → reject gap-spanning and invalid windows → write
-`data/manifest.json` as a list of `{input_frames: [...T paths], target_frame: path}`.
-
-**Stage 3 — Launch** (`python train.py`)
-Load `config.yaml` → init wandb → select device → construct `Clouds` →
-sequential split with the `T`-sample buffer (§5) → `DataLoader`s
-(train `shuffle=True`, val `shuffle=False`) → build `ConvLSTM` → Adam + MSE →
-`EarlyStopping` → `Trainer`.
-
-**Stage 4 — Per-epoch train** (`Trainer.train_one_epoch`)
-Per batch: dataset yields `(B, T, H, W)` and `(B, H, W)`; the engine inserts the
-channel axis via `inputs.unsqueeze(2)` → `(B, T, 1, H, W)` and
-`targets.unsqueeze(1)` → `(B, 1, H, W)`. Then zero grad → forward → MSE →
-backward → step. Returns mean training loss.
-
-**Stage 5 — Per-epoch validate** (`Trainer.validate`)
-Under `no_grad`, for each batch compute model output and the persistence
-prediction `inputs[:, -1]`; accumulate MSE and SSIM sums and pooled CSI counts
-for both; return the six metrics.
-
-**Stage 6 — Checkpoint, early stop, log**
-Save on any validation-loss improvement to
-`checkpoints/model_epoch_{epoch}.pt` (state dict + optimizer state + loss).
-`EarlyStopping(patience=5, min_delta=0.001)` monitors validation loss. All
-metrics are logged to wandb under a `val_` prefix.
-
-### Tensor shapes
-
-| stage | shape |
+| | |
 |---|---|
-| Dataset item (inputs, target) | `(T, 256, 256)`, `(256, 256)` |
-| Model input | `(B, T, 1, 256, 256)` |
-| ConvLSTM hidden / cell state per layer | `(B, hidden_dim, 256, 256)` |
-| Model output | `(B, 1, 256, 256)` |
+| Source files | 2964 HDF5 granules, July 2023 – July 2024 |
+| Usable frames | 2961 (3 were blank) |
+| One frame every | 30 minutes |
+| Image size | 1616 × 1737 pixels, one pixel ≈ 4 km |
+| Channels used | TIR1, TIR2, WV, MIR |
+| Size on disk | 66.5 GB |
 
-The ConvLSTM keeps full spatial resolution at every layer (padding preserves
-H×W, no downsampling), so memory scales with `hidden_dim × H × W × num_layers`.
-The final `conv_last` is a 1×1 convolution from `hidden_dim` to 1 channel,
-applied to the last layer's final hidden state.
+**What the four channels are.** Each is the same scene photographed at a
+different wavelength, and each shows something different:
 
-## 8. Correctness Fixes Applied
+- **TIR1** (10.8 µm) — the main cloud picture. Cold = high cloud tops = storms.
+  This is the one we predict.
+- **TIR2** (12.0 µm) — nearly the same view; helps identify thin cirrus.
+- **WV** (6.9 µm) — water vapour high in the atmosphere. Shows the airflow
+  steering the clouds.
+- **MIR** (3.9 µm) — useful for low cloud and fog.
 
-Recorded with rationale, since several of these are easy to reintroduce.
+The satellite also records visible and shortwave channels. We skipped those:
+they go black at night, and we need a forecaster that works around the clock.
 
-| # | Issue | Resolution |
+---
+
+## Preprocessing decisions
+
+### 1. We store the satellite's raw numbers, not temperatures
+
+A satellite pixel is not a temperature. It is a **count** — a whole number from
+0 to 1023 that the detector produced. Each file ships a small conversion table
+that says what its counts mean:
+
+```
+count  555  ->  292.31 K
+count  557  ->  292.01 K
+count  562  ->  291.27 K
+```
+
+The obvious approach is to convert everything to temperature once, and save
+that. We don't. We save the counts and keep the tables in a separate 27 MB
+file, then convert while the model is being fed.
+
+Why: a count needs only 10 bits; a temperature needs 32. Storing counts is
+**half the size and loses nothing** — the conversion is a lookup, so it can be
+redone any time. It also means we can change our minds about anything
+downstream without touching the 66 GB again.
+
+### 2. Every file gets its own conversion table
+
+The tables are not identical across files. The satellite is recalibrated as its
+detectors drift, by up to 13 K on the MIR channel. So count 555 means one
+temperature in a July file and a slightly different one in a January file.
+
+Using each file's own table is what makes the frames **comparable**. Reusing one
+table everywhere would inject fake variation the model would try to learn as
+weather.
+
+### 3. But the 0-to-1 scaling is global
+
+After converting to temperature, every frame is squeezed into the range 0–1
+using **one fixed range per channel**, the same for all 2961 frames:
+
+```json
+{ "TIR1": [179.86, 335.84], "TIR2": [179.93, 340.07],
+  "WV":   [179.69, 308.57], "MIR": [179.69, 339.79] }
+```
+
+So 180 K is always 0.0 and 335.84 K is always 1.0. Checked against all 8.3
+billion pixels: the real data lands exactly inside these bounds, so nothing is
+being cut off.
+
+### 4. Three dead frames removed
+
+Three granules came back blank or near-blank and were dropped:
+
+```
+3RIMG_31JUL2023_0420   100% empty
+3RIMG_11JUL2024_2015    98% empty
+3RIMG_22JUL2024_2057    11% empty
+```
+
+### 5. Whole images saved, small squares taken later
+
+We keep the full 1616 × 1737 image on disk and cut 256 × 256 squares only when
+training. Each image yields a 7 × 7 grid of 49 squares. Cutting at training
+time means the square size can change without redoing anything.
+
+**Files produced:**
+
+```
+data/processed_counts/*.npy     2961 frames, raw counts        66.5 GB
+data/luts.npz                   the conversion tables          27 MB
+data/norm_ranges.json           the 0-to-1 ranges              112 B
+data/manifest_counts.json       which 7 frames form a sequence 328 KB
+```
+
+---
+
+## Models and their configs
+
+Two architectures, one per GPU, same data and same settings otherwise — so the
+comparison is fair.
+
+| | **ConvLSTM** | **SimVP** |
 |---|---|---|
-| 1 | Manifest built windows across missing frames, so 8.7% of samples had a mislabeled lead time | `_is_continuous()` gap rejection (§4) |
-| 2 | Frames sorted lexicographically — correct for one month, scrambles across months | sort by parsed timestamp (§4) |
-| 3 | CSI thresholded `> 0.5`, scoring the warm 76% majority instead of cold cloud | threshold `< 0.5` for the cold class (§6) |
-| 4 | CSI averaged per-batch ratios instead of pooling counts | `csi_counts()` + `csi_from_counts()` (§6) |
-| 5 | CSI returned `0.0` on an empty denominator, penalizing correct no-cloud forecasts | returns `NaN` (§6) |
-| 6 | No baseline, so absolute metric values looked strong without evidence of skill | persistence baseline in `validate()` (§6) |
-| 7 | Loader substituted a random sample on load failure, leaking train frames into val and hiding corruption | raises instead (§4) |
-| 8 | Contiguous index split shared up to `T` raw frames across the train/val boundary | `T`-sample buffer dropped (§5) |
+| Idea | Watches frames in order, carrying a memory forward | Squashes all 6 frames at once and reconstructs |
+| Parameters | 747 K | 6.8 M |
+| Config | `config.yaml` | `config_simvp.yaml` |
+| Size | 3 layers, 64 hidden channels | hid_S 64, hid_T 256, N_S 4, N_T 4 |
+| Batch size | 8 | 24 |
+| Est. per epoch | ~70 min | ~25 min |
 
-## 9. Reference Data Characteristics
+Both take **all 4 channels in** and predict **TIR1 only** out. Extra channels
+are allowed to help without having to be predicted themselves — like glancing at
+the wind to guess where a cloud goes, without forecasting the wind.
 
-Measured on the current corpus; useful for sanity checks.
+---
 
-- **Coverage**: July 2023 only, single fixed 256×256 crop, 30-minute nominal cadence.
-- **Volume**: 1469 raw `.h5` ≈ **36 GB**; the same month processed ≈ **374 MB**
-  (~100× reduction). A full year of processed frames is only ~4.5 GB, so the
-  storage constraint is raw-archive retention, not training data.
-- **Continuity**: 1488 slots expected for the month, 1469 present → **19 missing
-  frames** across 23 irregular intervals, including a near-daily 06:45→07:45
-  hole (instrument housekeeping) on 17 of 31 days. These 19 gaps poison up to 6
-  windows each, which is why 114 samples are rejected.
-- **Manifest**: 1349 samples after gap rejection (1463 before).
-- **Class balance**: ~76% of pixels are warm (`> 0.5`), ~24% cold. The cold class
-  is the minority — which is exactly why CSI must score it.
-- **Clipping**: ~0.6% of pixels sit exactly at 0.0, ~0.06% at 1.0.
+## Training methodology
 
-### Indicative results
+### Splitting by date, not at random
 
-ConvLSTM (2 layers, `hidden_dim=64`), validation split, versus persistence:
+```
+train   2023-07-01 .. 2024-07-15     290 sequences
+  (16 July: buffer, unused)
+val     2024-07-17 .. 2024-07-23      46 sequences
+  (24 July: buffer, unused)
+test    2024-07-25 .. 2024-07-31      47 sequences
+```
 
-| metric | model | persistence | delta |
-|---|---|---|---|
-| MSE | 0.0100 | 0.0124 | −0.0024 |
-| SSIM | 0.536 | 0.468 | +0.068 |
-| CSI (cold, pooled) | 0.669 | 0.657 | +0.011 |
+Random splitting would be cheating: frames 30 minutes apart look almost
+identical, so the model would be tested on weather it had already seen. Splitting
+by date, with a buffer day between, keeps the test genuinely unseen.
 
-The margin over persistence is thin. Treat "beats persistence convincingly" as
-the bar for any architecture change, not MSE in isolation.
+With 49 squares per frame, 290 train sequences become **14,210 training
+examples**.
 
-## 10. Known Caveats and Open Issues
+### Settings
 
-**Data coverage is the dominant limitation.** One month, one crop, one season
-means validation measures a few days' extrapolation within the monsoon, not
-generalization. Metrics are a sanity check, not a reliable model-selection
-signal. Roughly a year of data — or at minimum 3–4 months spread across
-seasons — is needed before results generalize; duration across regimes matters
-more than raw sample count.
+| | |
+|---|---|
+| Loss | Mean squared error |
+| Optimiser | Adam |
+| Learning rate | 0.0001 |
+| LR schedule | halve it after 3 epochs with no improvement, floor 1e-6 |
+| Max epochs | 50 |
+| Early stopping | give up after 10 epochs with no improvement |
+| Seed | 42 |
 
-**Validation samples are highly autocorrelated.** Even with the boundary buffer,
-adjacent samples share `T-1` input frames, so the effective number of
-independent weather states is far below the nominal sample count.
+**What the learning rate does.** It is the size of the step the model takes when
+correcting itself. Too big and it overshoots the answer; too small and it takes
+forever. Starting at 0.0001 and halving it when progress stalls is the usual
+compromise: big strides early, careful shuffling later.
 
-**No test set.** Validation drives both early stopping and best-checkpoint
-selection, so reported validation metrics are selection-biased upward. A third
-held-out split is needed before quoting final numbers.
+### The score to beat
 
-**Model output is unbounded.** `conv_last` has no sigmoid or clamp; predictions
-reach roughly `[-0.04, 1.03]`. This violates SSIM's data-range-1 assumption
-(which fails silently) and leaves CSI thresholding undefined outside `[0,1]`.
+Every validation pass also scores **persistence** — the forecast "in 30 minutes
+it will look exactly like it does now." Over half an hour that is a
+surprisingly good guess, and it is the honest baseline. A model that doesn't
+clearly beat persistence has learned nothing about how clouds move.
 
-**Missing data is encoded as maximum cloud.** `np.nan_to_num(nan=0.0)` runs
-*after* normalization, and 0.0 means 180K — the coldest cloud top. Sensor
-dropouts and off-disk pixels therefore become synthetic deep convection. Impact
-is small on the current inland crop but would be severe on a crop touching the
-disk edge. A mask channel or a neutral fill value is the real fix.
+Reported each epoch: loss, SSIM (how similar the images look), PSNR (error in
+decibels) — model and persistence side by side.
 
-**`_is_valid()`'s NaN check cannot fire.** It runs on `.npy` files that have
-already been through `nan_to_num`, so no NaN survives to be caught. A frame
-that was 90% NaN becomes 90% zeros — a plausible-looking giant cloud — and
-passes validation. Partial-corruption detection needs to happen in
-`preprocess.py`, before the fill.
+---
 
-**`EarlyStopping(min_delta=0.001)` is coarse** relative to a validation MSE of
-~0.010, effectively demanding ~10% relative improvement per epoch and stopping
-prematurely.
+## Running it
 
-**No gradient clipping and no LR scheduler**, which matters more as `num_layers`
-grows and the recurrent stack deepens over `T` steps.
+```bash
+# one-off preprocessing, from raw granules
+./run_preprocess.sh
 
-**Checkpoints are named `model_epoch_{N}.pt` with no run or architecture
-identifier**, so successive runs with different `num_layers` interleave in
-`checkpoints/` and a stale file can be loaded against a mismatched config.
-Notebooks that hardcode a checkpoint filename are especially exposed.
+# check shapes, memory and epoch time without committing to a run
+python train.py --dry-run
 
-**Static crop.** Fixed geographic region; random or region-of-interest cropping
-would add spatial diversity.
+# the two experiments, one per GPU
+CUDA_VISIBLE_DEVICES=0 python train.py
+CUDA_VISIBLE_DEVICES=1 python train.py --config config_simvp.yaml
+```
 
-## 11. Environment
+Checkpoints go to `checkpoints/<timestamp>_<model>_<size>/`. Metrics go to
+Weights & Biases under project `cloud-diffusion-v2`, group `4ch-counts`.
 
-Conda environment with GPU support (`torchgpu` / `sat-cloud`):
+---
 
-- Python 3.11, PyTorch 2.6.0+cu124, CUDA 12.4.
-- `h5py`, `netCDF4`, `numpy`, `matplotlib`, `scipy`, `scikit-image`, `wandb`, `opencv`.
-- `nomkl` installed via conda to avoid `undefined symbol: omp_get_num_procs`
-  (MKL/OMP conflict) during visualization.
+## Where things stand
 
-See `README.md` for setup and run commands.
+- Data preprocessed, transferred to the HPC container, verified end to end.
+- Both experiments launched, one per Quadro RTX 6000.
+- `evaluate_test: false` — the test week stays untouched until a winner is
+  picked. Using it to make a decision is what stops it being an honest estimate.
+
+### Notes for the HPC container
+
+- `/dev/shm` is only 70 MB there, so `num_workers: 0`. With workers on, the
+  data loader crashes with a confusing "bus error".
+- Driver 470 caps us at CUDA 11.4, so PyTorch stays pinned to the CUDA 11.8
+  build. Don't upgrade it.
+- The file listing which frames form a sequence stores absolute paths, so it
+  must be rebuilt on the machine that uses it: `python -m src.manifest`.
