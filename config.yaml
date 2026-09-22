@@ -67,7 +67,7 @@ train:
 
 # Model Architecture
 model:
-  type: convlstm # convlstm or simvp
+  type: convlstm # convlstm | simvp | simvp2 | predrnn | phydnet
   # true = predict the change from the last frame instead of the whole frame
   residual: true
 
@@ -81,7 +81,27 @@ model:
   hid_T: 256
   N_S: 4
   N_T: 4
-  groups: 8
+  groups: 8   # simvp only; simvp2's translator has no grouped convs
+
+  # SimVPv2 -- reuses hid_S/hid_T/N_S/N_T above, so a v1 and a v2 run with the
+  # same numbers differ only in the translator (Inception vs gSTA attention).
+  mlp_ratio: 4.0
+  drop: 0.0
+  spatio_kernel: 21   # effective receptive field of the gSTA gate, in pixels
+
+  # PredRNN -- reuses hidden_dim/kernel_size/num_layers above. The zigzag memory
+  # is passed between every layer, so hidden_dim must be one number, not a list
+  # of differing widths. The paper uses 4 layers.
+
+  # PhyDNet
+  nf: 32                       # encoder/decoder width
+  latent_dim: 64               # the shared latent both branches recur in
+  phy_hidden_dims: 49          # PhyCell's operator bank; 49 = every operator a
+                               # 7x7 kernel can express, which is the paper's setting
+  phy_layers: 1
+  phy_kernel_size: 7
+  conv_hidden_dims: [128, 128, 64]   # the residual ConvLSTM branch
+  conv_layers: 3
 
 # Logging
 logging:

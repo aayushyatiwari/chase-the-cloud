@@ -13,6 +13,9 @@ from src.dataset import Clouds
 from src.manifest import split_indices
 from src.models.convlstm import ConvLSTM
 from src.models.simvp import SimVP
+from src.models.simvp2 import SimVPv2
+from src.models.predRNN import PredRNN
+from src.models.phydnet import PhyDNet
 from src.models.residual import ResidualWrapper
 from src.engine import Trainer, EarlyStopping
 from src.utils import latest_checkpoint, CombinedLoss
@@ -148,7 +151,7 @@ def build_model(config, dataset, device):
     """
     The model named by config.model.type, sized from the data.
 
-    Both architectures take all of the dataset's channels as input and emit only
+    Every architecture takes all of the dataset's channels as input and emits only
     dataset.target_channels -- the input is wider than the target by design, and
     the predicted channels come first. Returns (model, arch_tag), where arch_tag
     goes into the run name so a checkpoint can never be mistaken for one from a
@@ -177,8 +180,56 @@ def build_model(config, dataset, device):
             out_channels=dataset.target_channels,
         )
         arch_tag = f"hidS{m['hid_S']}_NT{m['N_T']}"
+    elif model_type == 'simvp2':
+        # Same encoder/decoder as simvp, gSTA MetaFormer translator instead of
+        # Inception. Keep hid_S/hid_T/N_S/N_T equal to the simvp run if the two
+        # are meant to be compared -- then only the translator differs.
+        model = SimVPv2(
+            shape_in=(config['data']['T'], dataset.C,
+                      config['data']['crop_size'], config['data']['crop_size']),
+            hid_S=m['hid_S'],
+            hid_T=m['hid_T'],
+            N_S=m['N_S'],
+            N_T=m['N_T'],
+            T_out=1,
+            mlp_ratio=float(m.get('mlp_ratio', 4.0)),
+            drop=float(m.get('drop', 0.0)),
+            spatio_kernel=m.get('spatio_kernel', 21),
+            out_channels=dataset.target_channels,
+        )
+        arch_tag = f"hidS{m['hid_S']}_NT{m['N_T']}_gsta{m.get('spatio_kernel', 21)}"
+    elif model_type == 'predrnn':
+        model = PredRNN(
+            input_dim=dataset.C,
+            hidden_dim=m['hidden_dim'],
+            kernel_size=m['kernel_size'],
+            num_layers=m['num_layers'],
+            out_channels=dataset.target_channels,
+        )
+        arch_tag = f"L{m['num_layers']}_h{m['hidden_dim']}"
+    elif model_type == 'phydnet':
+        model = PhyDNet(
+            input_dim=dataset.C,
+            out_channels=dataset.target_channels,
+            nf=m.get('nf', 32),
+            latent_dim=m.get('latent_dim', 64),
+            phy_hidden_dims=m.get('phy_hidden_dims', 49),
+            phy_layers=m.get('phy_layers', 1),
+            phy_kernel_size=m.get('phy_kernel_size', 7),
+            conv_hidden_dims=tuple(m.get('conv_hidden_dims', (128, 128, 64))),
+            conv_layers=m.get('conv_layers', 3),
+            conv_kernel_size=m.get('kernel_size', 3),
+        )
+        arch_tag = (f"lat{m.get('latent_dim', 64)}_phy{m.get('phy_layers', 1)}"
+                    f"x{m.get('phy_kernel_size', 7)}")
+        # The moment regulariser that makes PhyCell a PDE is a loss term, and
+        # nothing adds it yet -- see the note at the top of src/models/phydnet.py.
+        print("PhyDNet: moment regularisation is NOT applied; PhyCell's filters "
+              "are unconstrained until model.moment_loss() is added to the loss.")
     else:
-        raise ValueError(f"Unknown model.type: {model_type!r} (expected 'convlstm' or 'simvp')")
+        raise ValueError(
+            f"Unknown model.type: {model_type!r} "
+            f"(expected 'convlstm', 'simvp', 'simvp2', 'predrnn' or 'phydnet')")
 
     # Neither mode bounds its output, so the two stay comparable.
     if m.get('residual'):
