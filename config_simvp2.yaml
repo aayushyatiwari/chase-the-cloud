@@ -28,7 +28,9 @@ data:
 # Training Hyperparameters
 train:
   seed: 42
-  batch_size: 8
+  # Lower than SimVP v1's 24: gSTA's attention and its 4x MLP hold more
+  # activations than the Inception blocks they replace. Confirm with --dry-run.
+  batch_size: 16
   epochs: 50
   num_workers: 0
   lr: 0.0001
@@ -39,20 +41,17 @@ train:
   #          pixel training, the old behaviour.
   # GDL cannot see overall brightness -- add a constant to every pixel and it
   # does not change -- so alpha: 0 is an ablation, not a candidate.
+  # The two terms are not on the same scale. Run `python train.py --dry-run`,
+  # read the printed split, and set beta so they are comparable.
   #
-  # The weights below are the paper's own (Mathieu et al., ICLR 2016, sec 3.2):
-  # lambda_lp = 1, lambda_gdl = 1, alpha = 1, alongside an l1 pixel term. Its
-  # third weight, lambda_adv = 0.05, has no counterpart here -- there is no
-  # discriminator to weigh against.
-  #
-  # Keep the exponents matched: l1 with gdl_p 1, or mse with gdl_p 2. The paper
-  # normalised its patches to [-1, 1] and ours are [0, 1]; a matched pair scales
-  # the same way with the data range, so 1:1 carries over unchanged. Mixing mse
-  # with gdl_p 1 does not, and needs beta recalibrated from the --dry-run split.
+  # Left at the default -- plain MSE, no GDL -- so this architecture's first run
+  # is scored on the same objective the earlier ConvLSTM and SimVP runs were.
+  # Turn GDL on (pixel: l1, beta: 1.0) once the architecture itself is settled,
+  # so one run never changes two things at once.
   loss:
-    pixel: none     # mse | l1 | none
+    pixel: mse    # mse | l1 | none  ('none' drops the pixel term: an ablation)
     alpha: 1.0
-    beta: 1.0
+    beta: 0.0
     gdl_p: 1      # 1 = sharper and more robust, 2 = like MSE
   lr_schedule: true
   lr_factor: 0.5
@@ -67,41 +66,25 @@ train:
 
 # Model Architecture
 model:
-  type: convlstm # convlstm | simvp | simvp2 | predrnn | phydnet
+  type: simvp2 # convlstm | simvp | simvp2 | predrnn | phydnet
   # true = predict the change from the last frame instead of the whole frame
-  residual: true
+  residual: false
 
   # ConvLSTM
   hidden_dim: 64
   kernel_size: 3
   num_layers: 3
 
-  # SimVP
+  # SimVPv2 -- these four are shared with SimVP v1 and deliberately identical to
+  # config_simvp.yaml, so the only difference between the two runs is the
+  # translator: v1's Inception blocks vs v2's gSTA attention.
   hid_S: 64
   hid_T: 256
   N_S: 4
   N_T: 4
-  groups: 8   # simvp only; simvp2's translator has no grouped convs
-
-  # SimVPv2 -- reuses hid_S/hid_T/N_S/N_T above, so a v1 and a v2 run with the
-  # same numbers differ only in the translator (Inception vs gSTA attention).
   mlp_ratio: 4.0
   drop: 0.0
   spatio_kernel: 21   # effective receptive field of the gSTA gate, in pixels
-
-  # PredRNN -- reuses hidden_dim/kernel_size/num_layers above. The zigzag memory
-  # is passed between every layer, so hidden_dim must be one number, not a list
-  # of differing widths. The paper uses 4 layers.
-
-  # PhyDNet
-  nf: 32                       # encoder/decoder width
-  latent_dim: 64               # the shared latent both branches recur in
-  phy_hidden_dims: 49          # PhyCell's operator bank; 49 = every operator a
-                               # 7x7 kernel can express, which is the paper's setting
-  phy_layers: 1
-  phy_kernel_size: 7
-  conv_hidden_dims: [128, 128, 64]   # the residual ConvLSTM branch
-  conv_layers: 3
 
 # Logging
 logging:
@@ -113,5 +96,5 @@ logging:
   # the same across the two GPUs so the architectures compare side by side --
   # change `project` instead if you want them fully separate.
   group: "4ch-counts"
-  tags: ["convlstm", "4ch", "tir1-target"]
-  notes: "ConvLSTM L3 h64 - 4 input channels, TIR1 target, uint16 counts + LUT at load"
+  tags: ["simvp2", "4ch", "tir1-target"]
+  notes: "SimVPv2 hidS64 NT4 gSTA21 - same encoder/decoder as SimVP, gSTA translator"
