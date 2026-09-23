@@ -29,7 +29,7 @@ data:
 train:
   seed: 42
   batch_size: 8
-  epochs: 50
+  epochs: 100
   num_workers: 0
   lr: 0.0001
   # Loss:  L = alpha * pixel + beta * GDL
@@ -69,7 +69,7 @@ train:
 model:
   type: convlstm # convlstm | simvp | simvp2 | predrnn | phydnet
   # true = predict the change from the last frame instead of the whole frame
-  residual: true
+  residual: false
 
   # ConvLSTM
   hidden_dim: 64
