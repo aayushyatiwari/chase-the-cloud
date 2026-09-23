@@ -382,10 +382,11 @@ def main(args):
     # 5. Initialize the Trainer (The Engine)
     # e.g. 20260828_161422_convlstm_L3_h64 -- timestamp plus architecture, so a
     # stale checkpoint can never be mistaken for one matching the current config.
+    # run_tag is also what resume_from: latest matches on (see step 6).
+    run_tag = f"{config['model']['type']}_{arch_tag}"
     run_name = (args.name
                 or config['logging'].get('run_name')
-                or f"{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-                   f"_{config['model']['type']}_{arch_tag}")
+                or f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{run_tag}")
     print(f"Run name: {run_name}")
 
     # 2. Initialize wandb, now that the run has a name.
@@ -421,7 +422,10 @@ def main(args):
     resume_from = config['train'].get('resume_from')
     if resume_from:
         if resume_from == 'latest':
-            resume_from = latest_checkpoint(config['train']['checkpoint_dir'], model=model)
+            # Same experiment only: same model type, architecture and loss
+            # (run_tag), and weights that actually fit the model.
+            resume_from = latest_checkpoint(config['train']['checkpoint_dir'],
+                                            model=model, run_tag=run_tag)
         start_epoch, best_val_loss = trainer.load_checkpoint(resume_from, lr=lr)
         early.best_loss = best_val_loss
 

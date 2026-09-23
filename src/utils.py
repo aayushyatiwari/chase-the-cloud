@@ -1,4 +1,5 @@
 import math
+import re
 
 import torch
 import torch.nn as nn
@@ -7,7 +8,11 @@ import numpy as np
 from pathlib import Path
 
 
-def latest_checkpoint(checkpoint_dir='checkpoints', model=None):
+# Run directories are named <YYYYmmdd_HHMMSS>_<run tag>, see train.py
+_RUN_DIR = re.compile(r'^\d{8}_\d{6}_(.+)$')
+
+
+def latest_checkpoint(checkpoint_dir='checkpoints', model=None, run_tag=None):
     """
     Most recently written .pt under checkpoint_dir, searched recursively so it
     picks up the newest per-run subdirectory (e.g. 20260828_201053_L3_h64/).
@@ -21,10 +26,20 @@ def latest_checkpoint(checkpoint_dir='checkpoints', model=None):
     when resuming a ConvLSTM). Matching on the weights themselves rather than
     the run name also covers old run directories that predate the model type
     being in the name, and catches hidden_dim / num_layers / residual changes.
+
+    Pass `run_tag` (e.g. 'convlstm_L3_h64_gdl1_a0b1') to also require the run
+    directory to carry exactly that tag. The weights can't tell an MSE run
+    from a GDL run of the same architecture; the tag can, so a resume stays
+    within one experiment. Untagged or custom-named run directories never
+    match -- resume those with an explicit path.
     """
     paths = sorted(Path(checkpoint_dir).rglob('*.pt'), key=lambda p: p.stat().st_mtime)
+    if run_tag is not None:
+        paths = [p for p in paths
+                 if (m := _RUN_DIR.match(p.parent.name)) and m.group(1) == run_tag]
     if not paths:
-        raise FileNotFoundError(f"No .pt checkpoints found under {checkpoint_dir}")
+        where = f" for run tag {run_tag!r}" if run_tag else ""
+        raise FileNotFoundError(f"No .pt checkpoints found under {checkpoint_dir}{where}")
     if model is None:
         return paths[-1]
 
