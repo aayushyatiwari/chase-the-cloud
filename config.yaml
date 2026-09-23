@@ -50,9 +50,9 @@ train:
   # the same way with the data range, so 1:1 carries over unchanged. Mixing mse
   # with gdl_p 1 does not, and needs beta recalibrated from the --dry-run split.
   loss:
-    pixel: none     # mse | l1 | none
+    pixel: mse     # mse | l1 | none
     alpha: 1.0
-    beta: 1.0
+    beta: 0.0
     gdl_p: 1      # 1 = sharper and more robust, 2 = like MSE
   lr_schedule: true
   lr_factor: 0.5
