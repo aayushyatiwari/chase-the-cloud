@@ -7,18 +7,38 @@ import numpy as np
 from pathlib import Path
 
 
-def latest_checkpoint(checkpoint_dir='checkpoints'):
+def latest_checkpoint(checkpoint_dir='checkpoints', model=None):
     """
     Most recently written .pt under checkpoint_dir, searched recursively so it
     picks up the newest per-run subdirectory (e.g. 20260828_201053_L3_h64/).
 
     train.py only saves on a validation-loss improvement, so the newest
     checkpoint of a run is also its best so far.
+
+    Pass `model` to only accept a checkpoint whose weights fit it: same keys
+    and same shapes. checkpoint_dir holds every architecture's runs, so the
+    newest file overall may belong to a different model (e.g. a PredRNN run
+    when resuming a ConvLSTM). Matching on the weights themselves rather than
+    the run name also covers old run directories that predate the model type
+    being in the name, and catches hidden_dim / num_layers / residual changes.
     """
     paths = sorted(Path(checkpoint_dir).rglob('*.pt'), key=lambda p: p.stat().st_mtime)
     if not paths:
         raise FileNotFoundError(f"No .pt checkpoints found under {checkpoint_dir}")
-    return paths[-1]
+    if model is None:
+        return paths[-1]
+
+    expected = {k: v.shape for k, v in model.state_dict().items()}
+    for path in reversed(paths):
+        # mmap: only the header is read here, not every tensor in the file
+        state = torch.load(path, map_location='cpu', mmap=True)['model_state_dict']
+        if {k: v.shape for k, v in state.items()} == expected:
+            if path != paths[-1]:
+                print("latest_checkpoint: skipped newer checkpoints that don't fit this model")
+            return path
+    raise FileNotFoundError(
+        f"No checkpoint under {checkpoint_dir} matches the current model "
+        f"({len(paths)} .pt files checked). Set train.resume_from to null or a path.")
 
 def ssim(img1, img2, window_size=11, size_average=True):
     """

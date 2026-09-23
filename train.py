@@ -421,7 +421,7 @@ def main(args):
     resume_from = config['train'].get('resume_from')
     if resume_from:
         if resume_from == 'latest':
-            resume_from = latest_checkpoint(config['train']['checkpoint_dir'])
+            resume_from = latest_checkpoint(config['train']['checkpoint_dir'], model=model)
         start_epoch, best_val_loss = trainer.load_checkpoint(resume_from, lr=lr)
         early.best_loss = best_val_loss
 
