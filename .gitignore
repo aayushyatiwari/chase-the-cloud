@@ -31,3 +31,6 @@ nohup.out
 
 # Dataset archives staged for transfer to a remote machine
 *.tar.gz
+
+# misc
+presentation/

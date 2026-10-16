@@ -68,7 +68,7 @@ train:
 model:
   type: simvp2 # convlstm | simvp | simvp2 | predrnn | phydnet
   # true = predict the change from the last frame instead of the whole frame
-  residual: false
+  residual: true
 
   # ConvLSTM
   hidden_dim: 64
