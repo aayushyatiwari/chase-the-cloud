@@ -28,9 +28,9 @@ data:
 # Training Hyperparameters
 train:
   seed: 42
-  # Same as SimVPv2 so the two compare at equal batch size. 768 tokens x 8
-  # blocks should fit well inside 24GB; confirm with --dry-run.
-  batch_size: 120
+  # Same as the simvp2_res run (B=8) so the two compare at equal batch size.
+  # Memory is not the limit: B=120 peaked at 20GB of 24GB in --dry-run.
+  batch_size: 8
   epochs: 50
   num_workers: 0
   lr: 0.0001
@@ -68,7 +68,9 @@ train:
 model:
   type: vit # convlstm | simvp | simvp2 | predrnn | phydnet | vit
   # true = predict the change from the last frame instead of the whole frame.
-  # The ViT head starts at zero, so with this on it starts at persistence.
+  # The ViT head starts at zero, so with this on it starts at persistence; with
+  # it off it starts at a blank 0.0 frame. config_vit_res.yaml is the same run
+  # with this on.
   residual: false
 
   # ViT -- tokens = (T / tubelet) x (crop_size / patch_size)^2
@@ -92,5 +94,5 @@ logging:
   # the same across the two GPUs so the architectures compare side by side --
   # change `project` instead if you want them fully separate.
   group: "4ch-counts"
-  tags: ["vit", "4ch", "tir1-target", "residual"]
-  notes: "ViT p16 t2 d384x8 h6 residual - joint space-time attention, 4ch in, TIR1 target"
+  tags: ["vit", "4ch", "tir1-target"]
+  notes: "ViT p16 t2 d384x8 h6 - joint space-time attention, 4ch in, TIR1 target"
