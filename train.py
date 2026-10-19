@@ -16,6 +16,7 @@ from src.models.simvp import SimVP
 from src.models.simvp2 import SimVPv2
 from src.models.predRNN import PredRNN
 from src.models.phydnet import PhyDNet
+from src.models.vit import ViT
 from src.models.residual import ResidualWrapper
 from src.engine import Trainer, EarlyStopping
 from src.utils import latest_checkpoint, CombinedLoss
@@ -226,10 +227,25 @@ def build_model(config, dataset, device):
         # nothing adds it yet -- see the note at the top of src/models/phydnet.py.
         print("PhyDNet: moment regularisation is NOT applied; PhyCell's filters "
               "are unconstrained until model.moment_loss() is added to the loss.")
+    elif model_type == 'vit':
+        model = ViT(
+            shape_in=(config['data']['T'], dataset.C,
+                      config['data']['crop_size'], config['data']['crop_size']),
+            patch_size=m.get('patch_size', 16),
+            tubelet=m.get('tubelet', 2),
+            embed_dim=m.get('embed_dim', 384),
+            depth=m.get('depth', 8),
+            num_heads=m.get('num_heads', 6),
+            mlp_ratio=float(m.get('mlp_ratio', 4.0)),
+            drop=float(m.get('drop', 0.0)),
+            out_channels=dataset.target_channels,
+        )
+        arch_tag = (f"p{m.get('patch_size', 16)}t{m.get('tubelet', 2)}"
+                    f"_d{m.get('embed_dim', 384)}x{m.get('depth', 8)}")
     else:
         raise ValueError(
             f"Unknown model.type: {model_type!r} "
-            f"(expected 'convlstm', 'simvp', 'simvp2', 'predrnn' or 'phydnet')")
+            f"(expected 'convlstm', 'simvp', 'simvp2', 'predrnn', 'phydnet' or 'vit')")
 
     # Neither mode bounds its output, so the two stay comparable.
     if m.get('residual'):
