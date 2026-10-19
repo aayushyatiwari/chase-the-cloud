@@ -30,7 +30,7 @@ train:
   seed: 42
   # Same as SimVPv2 so the two compare at equal batch size. 768 tokens x 8
   # blocks should fit well inside 24GB; confirm with --dry-run.
-  batch_size: 20
+  batch_size: 120
   epochs: 50
   num_workers: 0
   lr: 0.0001
@@ -69,7 +69,7 @@ model:
   type: vit # convlstm | simvp | simvp2 | predrnn | phydnet | vit
   # true = predict the change from the last frame instead of the whole frame.
   # The ViT head starts at zero, so with this on it starts at persistence.
-  residual: true
+  residual: false
 
   # ViT -- tokens = (T / tubelet) x (crop_size / patch_size)^2
   #   = 3 x 16 x 16 = 768 at these settings. Attention cost grows with the
