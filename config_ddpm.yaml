@@ -56,11 +56,12 @@ train:
 # Model Architecture
 model:
   type: ddpm
-  # Diffuse the change from the last input frame instead of the frame itself.
-  # The change is small, so it is divided by residual_scale first. Run
-  # --dry-run and set residual_scale so the printed x0 std is about 1.
+  # Full-frame prediction: the target TIR1 frame is mapped from [0, 1] to
+  # [-1, 1] and diffused directly (dry-run x0 std 0.32, range [-1, 0.59]).
+  # The residual experiment is config_ddpm.yaml on the second_gpu branch, which
+  # differs only in these two lines and the logging block -- one change at a time.
   residual: false
-  residual_scale: 0.1
+  residual_scale: 0.02     # unused when residual is false
 
   # Diffusion
   timesteps: 1000          # training noise levels
@@ -86,5 +87,5 @@ logging:
   use_wandb: true
   run_name: null
   group: "4ch-counts"
-  tags: ["ddpm", "4ch", "tir1-target", "residual"]
-  notes: "Conditional DDPM (SR3-style concat), U-Net c64, cosine 1000, 50-step sampler, residual"
+  tags: ["ddpm", "4ch", "tir1-target", "full-frame"]
+  notes: "Conditional DDPM (SR3-style concat), U-Net c64, cosine 1000, 50-step sampler, full frame"

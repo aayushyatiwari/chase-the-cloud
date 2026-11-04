@@ -99,8 +99,9 @@ def run_dry(model, criterion, optimizer, train_loader, val_loader, device, steps
     if hasattr(model, 'encode_target'):
         # What residual_scale is for: the diffusion signal should be ~unit std.
         x0 = model.encode_target(inputs.to(device), targets.to(device))
-        print(f"diffusion x0 std {x0.std():.4f}, range [{x0.min():.3f}, {x0.max():.3f}]"
-              f"  <- aim for std ~1 (set model.residual_scale)")
+        hint = ("  <- aim for std ~1 (set model.residual_scale)" if model.residual
+                else "  <- full frame mapped to [-1, 1]; no scaling needed")
+        print(f"diffusion x0 std {x0.std():.4f}, range [{x0.min():.3f}, {x0.max():.3f}]{hint}")
 
     if device.type == 'cuda':
         torch.cuda.reset_peak_memory_stats(device)
