@@ -1,0 +1,90 @@
+# Data Settings
+data:
+  manifest_path: "data/manifest_counts.json"
+  # Frames on disk are uint16 sensor counts. These two turn a count into a
+  # normalised brightness temperature at load time; see src/dataset.py.
+  lut_path: "data/luts.npz"
+  norm_ranges_path: "data/norm_ranges.json"
+  T: 6
+  crop_size: 256
+  # How many leading channels the model predicts. Inputs are all 4 channels;
+  # the target is TIR1 only, which is what ConvLSTM's 1-channel head expects.
+  target_channels: 1
+
+  # Inclusive date ranges. 16 and 24 July 2024 belong to no split: they are
+  # buffer days keeping train, val and test more than a day apart.
+  splits:
+    train: ["2023-07-01", "2024-07-15"]   #  291 windows, 73%
+    val:   ["2024-07-17", "2024-07-23"]   #   46 windows, 12%
+    test:  ["2024-07-25", "2024-07-31"]   #   47 windows, 12%
+
+  # Val is a training signal (early stopping, LR schedule, checkpoint choice),
+  # so it is not an unbiased estimate. Turn this on once, at the end.
+  evaluate_test: false
+  # Tile spacing for every split. 256 = non-overlapping, 49 tiles on a
+  # 1616x1737 sector (6x6 plus a flush row and column against the far edges).
+  crop_stride: 256
+
+# Training Hyperparameters
+train:
+  seed: 42
+  # Same as the other runs. Confirm memory with --dry-run.
+  batch_size: 8
+  epochs: 50
+  num_workers: 0
+  # DDPM's usual rate is 1e-4 to 2e-4. Kept at the repo's 1e-4.
+  lr: 0.0001
+  # The DDPM trains on its own noise-prediction loss, not this one. The
+  # criterion below is still what validation scores the *sampled* forecast
+  # (and persistence) with, so val loss stays comparable with the other runs.
+  loss:
+    pixel: mse
+    alpha: 1.0
+    beta: 0.0
+    gdl_p: 1
+  lr_schedule: true
+  lr_factor: 0.5
+  lr_patience: 3
+  lr_min: 1.0e-6
+  checkpoint_dir: "checkpoints"
+  # Diffusion improves slowly and val loss is noisier than a regressor's, so
+  # patience is longer than elsewhere.
+  early_stopping_patience: 15
+  early_stopping_min_delta: 0.00001
+  resume_from: null # latest for last checkpoint
+
+# Model Architecture
+model:
+  type: ddpm
+  # Diffuse the change from the last input frame instead of the frame itself.
+  # The change is small, so it is divided by residual_scale first. Run
+  # --dry-run and set residual_scale so the printed x0 std is about 1.
+  residual: false
+  residual_scale: 0.1
+
+  # Diffusion
+  timesteps: 1000          # training noise levels
+  beta_schedule: cosine    # linear (Ho et al.) | cosine (Improved DDPM)
+  # Sampler passes per forecast. 1000 = the paper's sampler; fewer is the
+  # respaced sampler. Validation costs this many U-Net passes per batch, so it
+  # dominates epoch time -- read the --dry-run estimate before raising it.
+  sample_steps: 50
+  ema_decay: 0.9999        # samples come from these averaged weights
+  ensemble_size: 1         # >1 averages samples: lower MSE, blurrier
+
+  # U-Net denoiser. 256 -> 128 -> 64 -> 32, attention at 32x32.
+  base_channels: 64
+  channel_mult: [1, 2, 2, 4]
+  num_res_blocks: 2
+  attn_levels: [3]
+  num_heads: 4
+  drop: 0.1
+
+# Logging
+logging:
+  project: "cloud-diffusion-v2"
+  use_wandb: true
+  run_name: null
+  group: "4ch-counts"
+  tags: ["ddpm", "4ch", "tir1-target", "residual"]
+  notes: "Conditional DDPM (SR3-style concat), U-Net c64, cosine 1000, 50-step sampler, residual"

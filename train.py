@@ -17,8 +17,9 @@ from src.models.simvp2 import SimVPv2
 from src.models.predRNN import PredRNN
 from src.models.phydnet import PhyDNet
 from src.models.vit import ViT
+from src.models.ddpm import DDPM
 from src.models.residual import ResidualWrapper
-from src.engine import Trainer, EarlyStopping
+from src.engine import Trainer, EarlyStopping, compute_loss, after_step
 from src.utils import latest_checkpoint, CombinedLoss
 import time
 
@@ -86,7 +87,7 @@ def run_dry(model, criterion, optimizer, train_loader, val_loader, device, steps
     afternoon.
     """
     print(f"\n=== DRY RUN: {steps} train steps, {steps} val steps ===")
-    n_params = sum(p.numel() for p in model.parameters())
+    n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Parameters: {n_params:,}")
 
     inputs, targets, out = check_output_shape(model, train_loader, device)
@@ -95,6 +96,11 @@ def run_dry(model, criterion, optimizer, train_loader, val_loader, device, steps
     print(f"targets {tuple(targets.shape)} {targets.dtype} "
           f"[{targets.min():.4f}, {targets.max():.4f}]")
     print(f"outputs {tuple(out.shape)}  <- matches target")
+    if hasattr(model, 'encode_target'):
+        # What residual_scale is for: the diffusion signal should be ~unit std.
+        x0 = model.encode_target(inputs.to(device), targets.to(device))
+        print(f"diffusion x0 std {x0.std():.4f}, range [{x0.min():.3f}, {x0.max():.3f}]"
+              f"  <- aim for std ~1 (set model.residual_scale)")
 
     if device.type == 'cuda':
         torch.cuda.reset_peak_memory_stats(device)
@@ -107,9 +113,10 @@ def run_dry(model, criterion, optimizer, train_loader, val_loader, device, steps
             break
         inputs, targets = inputs.to(device), targets.to(device)
         optimizer.zero_grad()
-        loss = criterion(model(inputs), targets)
+        loss = compute_loss(model, criterion, inputs, targets)
         loss.backward()
         optimizer.step()
+        after_step(model)
         done += 1
         # The two terms are on different scales, so the split is what tells you
         # whether beta is large enough for the gradient term to matter at all.
@@ -242,10 +249,37 @@ def build_model(config, dataset, device):
         )
         arch_tag = (f"p{m.get('patch_size', 16)}t{m.get('tubelet', 2)}"
                     f"_d{m.get('embed_dim', 384)}x{m.get('depth', 8)}")
+    elif model_type == 'ddpm':
+        # Residual is handled inside the DDPM (it has to happen before noise is
+        # added), so ResidualWrapper is skipped below.
+        model = DDPM(
+            in_channels=dataset.C,
+            T=config['data']['T'],
+            out_channels=dataset.target_channels,
+            timesteps=m.get('timesteps', 1000),
+            beta_schedule=m.get('beta_schedule', 'linear'),
+            sample_steps=m.get('sample_steps', 50),
+            residual=bool(m.get('residual', False)),
+            residual_scale=float(m.get('residual_scale', 0.1)),
+            ema_decay=float(m.get('ema_decay', 0.9999)),
+            ensemble_size=m.get('ensemble_size', 1),
+            base_channels=m.get('base_channels', 64),
+            channel_mult=tuple(m.get('channel_mult', (1, 2, 2, 4))),
+            num_res_blocks=m.get('num_res_blocks', 2),
+            attn_levels=tuple(m.get('attn_levels', (3,))),
+            num_heads=m.get('num_heads', 4),
+            dropout=float(m.get('drop', 0.0)),
+        )
+        arch_tag = (f"c{m.get('base_channels', 64)}_{m.get('beta_schedule', 'linear')}"
+                    f"{m.get('timesteps', 1000)}_s{m.get('sample_steps', 50)}")
+        if m.get('residual'):
+            arch_tag += "_res"
+            print("Residual mode: DDPM diffuses the change from the last input frame")
+        return model.to(device), arch_tag
     else:
         raise ValueError(
             f"Unknown model.type: {model_type!r} "
-            f"(expected 'convlstm', 'simvp', 'simvp2', 'predrnn', 'phydnet' or 'vit')")
+            f"(expected 'convlstm', 'simvp', 'simvp2', 'predrnn', 'phydnet', 'vit' or 'ddpm')")
 
     # Neither mode bounds its output, so the two stay comparable.
     if m.get('residual'):
@@ -355,7 +389,8 @@ def main(args):
 
     # float() guards against YAML parsing e.g. 3e-5 as a string
     lr = float(config['train']['lr'])
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    # Trainable parameters only: the DDPM's EMA copy is updated by hand.
+    optimizer = torch.optim.Adam([p for p in model.parameters() if p.requires_grad], lr=lr)
     criterion, loss_tag = build_criterion(config)
     # The objective is part of what a checkpoint is, so it goes in the name.
     # Plain MSE is the old default and keeps the old naming, so earlier runs
@@ -485,6 +520,8 @@ def main(args):
         print(f"    Val Loss:   {val_metrics['loss']:.4f}  (persistence {val_metrics['persistence_loss']:.4f})")
         print(f"    Val SSIM:   {val_metrics['ssim']:.4f}  (persistence {val_metrics['persistence_ssim']:.4f})")
         print(f"    Val PSNR:   {val_metrics['psnr']:.2f} dB  (persistence {val_metrics['persistence_psnr']:.2f} dB)")
+        if 'denoise_loss' in val_metrics:
+            print(f"    Val denoise loss: {val_metrics['denoise_loss']:.4f}  (train objective)")
         print(f"    Time:       {fmt_duration(epoch_secs)} "
               f"(train {fmt_duration(train_secs)}, val {fmt_duration(val_secs)})")
         print(f"    Elapsed:    {fmt_duration(elapsed)}, "

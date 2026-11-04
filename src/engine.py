@@ -2,6 +2,25 @@ import torch
 import os
 from datetime import datetime
 
+
+def compute_loss(model, criterion, inputs, targets):
+    """
+    The training loss for one batch.
+
+    A regressor is scored on its output: criterion(model(inputs), targets). A
+    diffusion model is not -- its forward() runs the whole sampler, and what it
+    trains on is a noise-prediction loss -- so it supplies training_loss itself.
+    """
+    if hasattr(model, 'training_loss'):
+        return model.training_loss(inputs, targets)
+    return criterion(model(inputs), targets)
+
+
+def after_step(model):
+    """Post-optimizer-step hook; the DDPM uses it to update its EMA weights."""
+    if hasattr(model, 'after_step'):
+        model.after_step()
+
 class Trainer:
     """
     The Engine: This class handles the actual training loop, validation, and checkpointing.
@@ -36,12 +55,12 @@ class Trainer:
 
             # 2. Forward pass
             self.optimizer.zero_grad()
-            outputs = self.model(inputs)
-            loss = self.criterion(outputs, targets)
-            
+            loss = compute_loss(self.model, self.criterion, inputs, targets)
+
             # 3. Backward pass and optimization
             loss.backward()
             self.optimizer.step()
+            after_step(self.model)
             
             running_loss += loss.item() * targets.shape[0]
             n_seen += targets.shape[0]
@@ -59,7 +78,18 @@ class Trainer:
         Also scores a persistence forecast (repeat the last input frame) on the
         same batches. A model that does not clearly beat persistence has learned
         no cloud motion, so these numbers belong next to every model metric.
+
+        Runs under a fixed, forked RNG. The regressors are deterministic in eval
+        and do not notice; a diffusion model samples, and without this its
+        validation score would change from epoch to epoch through the noise
+        alone -- and consume the training RNG stream while doing it.
         """
+        devices = [self.device] if self.device.type == 'cuda' else []
+        with torch.random.fork_rng(devices=devices):
+            torch.manual_seed(0)
+            return self._validate(dataloader)
+
+    def _validate(self, dataloader):
         from src.utils import ssim, squared_error_counts, psnr_from_mse
         self.model.eval()
 
@@ -74,6 +104,10 @@ class Trainer:
         sq_err = {'model': 0.0, 'persistence': 0.0}
         n_elem = {'model': 0, 'persistence': 0}
         n_seen = 0
+        # Diffusion only: the training objective on held-out data. Cheap and
+        # smooth, but only loosely tied to how good the samples are.
+        denoise = 0.0
+        is_diffusion = hasattr(self.model, 'training_loss')
 
         with torch.no_grad():
             for inputs, targets in dataloader:
@@ -99,6 +133,8 @@ class Trainer:
                     se, n = squared_error_counts(pred, targets)
                     sq_err[name] += se
                     n_elem[name] += n
+                if is_diffusion:
+                    denoise += self.model.training_loss(inputs, targets).item() * batch
 
         metrics = {}
         for name in ('model', 'persistence'):
@@ -106,6 +142,8 @@ class Trainer:
             metrics[prefix + 'loss'] = weighted[name][0] / n_seen
             metrics[prefix + 'ssim'] = weighted[name][1] / n_seen
             metrics[prefix + 'psnr'] = psnr_from_mse(sq_err[name] / n_elem[name])
+        if is_diffusion:
+            metrics['denoise_loss'] = denoise / n_seen
         return metrics
 
 
